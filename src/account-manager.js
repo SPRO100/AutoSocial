@@ -35,10 +35,24 @@ function normalizePersonaProfileId(value) {
 // round-trip. Extend this (not a bare {id, name} literal) when adding a new
 // optional account field, or it will silently vanish the next time
 // accounts-state.json is read.
+function normalizeSourceField(value) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
 function normalizeAccount(item) {
   const account = { id: item.id, name: item.name };
   const personaProfileId = normalizePersonaProfileId(item.personaProfileId);
   if (personaProfileId) account.personaProfileId = personaProfileId;
+  // Set only for accounts created by the bulk importer (src/importers/) -
+  // lets it detect "this supplier record was already imported" without
+  // guessing from the account name/id, which addAccount() may have
+  // suffixed (-2, -3, ...) to stay unique.
+  const importPlatform = normalizeSourceField(item.importPlatform);
+  const importUsername = normalizeSourceField(item.importUsername);
+  if (importPlatform) account.importPlatform = importPlatform;
+  if (importUsername) account.importUsername = importUsername;
   return account;
 }
 
@@ -79,8 +93,28 @@ function ensureUniqueId(baseId, existing) {
   return `${baseId}-${index}`;
 }
 
+// Serializes every actual disk write behind a FIFO queue. The JSON payload
+// is captured synchronously here, at call time - before this function's
+// first await - so it always reflects the exact in-memory state at the
+// moment saveState() was invoked (JS's single-threaded execution means no
+// other mutation can interleave before that point). Chaining the write
+// itself onto the queue (rather than firing fs.writeFile calls
+// independently) guarantees they land on disk in the same order they were
+// requested, so the LAST call - always the most up to date, since callers
+// mutate `state` before calling saveState() - is also the last to actually
+// write, and never gets silently clobbered by an earlier, staler write
+// finishing after it. Needed because the bulk importer (src/importers/
+// pipeline.js) calls addAccount/setPersonaProfileId from several concurrent
+// workers, which single-request dashboard routes never did before.
+let writeQueue = Promise.resolve();
+
 async function saveState() {
-  await fs.writeFile(STATE_FILE, JSON.stringify(state, null, 2), "utf8");
+  const payload = JSON.stringify(state, null, 2);
+  const write = writeQueue.then(() => fs.writeFile(STATE_FILE, payload, "utf8"));
+  // Keep the queue alive even if this particular write fails, and never let
+  // an earlier failure poison every write after it.
+  writeQueue = write.catch(() => {});
+  return write;
 }
 
 async function ensureLoaded() {
@@ -136,7 +170,7 @@ async function ensureAccountDirs(accountId) {
 
 // Account CRUD
 
-async function addAccount(name) {
+async function addAccount(name, extra = {}) {
   await ensureLoaded();
   const cleanName = sanitizeName(name);
   if (!cleanName) {
@@ -146,6 +180,10 @@ async function addAccount(name) {
   const existingIds = new Set(state.accounts.map((item) => item.id));
   const id = ensureUniqueId(makeId(cleanName), existingIds);
   const account = { id, name: cleanName };
+  const importPlatform = normalizeSourceField(extra.importPlatform);
+  const importUsername = normalizeSourceField(extra.importUsername);
+  if (importPlatform) account.importPlatform = importPlatform;
+  if (importUsername) account.importUsername = importUsername;
   state.accounts.push(account);
   state.activeAccountId = account.id;
   await saveState();
@@ -154,6 +192,45 @@ async function addAccount(name) {
   await ensureAccountDirs(id);
 
   return clone(account);
+}
+
+// Real rollback primitive for the bulk importer (src/importers/pipeline.js):
+// removes an account this process just created after a later pipeline step
+// failed (e.g. Persona profile creation failed after the AutoSocial account
+// was already added), so a partial import never leaves an orphan account
+// behind. Deliberately does NOT touch queue/profile directories on disk -
+// same conservative "never silently delete user files" stance as the rest
+// of this module; an empty leftover directory is harmless.
+async function removeAccount(accountId) {
+  await ensureLoaded();
+  const index = state.accounts.findIndex((item) => item.id === accountId);
+  if (index === -1) return false;
+  if (state.accounts.length === 1) {
+    throw new Error("Cannot remove the last remaining account.");
+  }
+  state.accounts.splice(index, 1);
+  if (state.activeAccountId === accountId) {
+    state.activeAccountId = state.accounts[0].id;
+  }
+  await saveState();
+  return true;
+}
+
+// Duplicate-import detection: does an account already exist for this exact
+// supplier (platform, username) pair? Used by the import pipeline so
+// re-uploading the same supplier file is a safe no-op per record instead of
+// creating a second AutoSocial account for the same real identity.
+async function findAccountByImportSource(platform, username) {
+  await ensureLoaded();
+  const p = normalizeSourceField(platform);
+  const u = normalizeSourceField(username);
+  if (!p || !u) return null;
+  const match = state.accounts.find(
+    (item) =>
+      normalizeSourceField(item.importPlatform)?.toLowerCase() === p.toLowerCase() &&
+      normalizeSourceField(item.importUsername)?.toLowerCase() === u.toLowerCase()
+  );
+  return match ? clone(match) : null;
 }
 
 async function selectAccount(accountId) {
@@ -300,6 +377,8 @@ async function hasSavedPlatformSession(platform, accountId) {
 module.exports = {
   getState,
   addAccount,
+  removeAccount,
+  findAccountByImportSource,
   selectAccount,
   getActiveAccount,
   getAllAccounts,

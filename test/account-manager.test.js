@@ -193,3 +193,76 @@ test("hasSavedPlatformSession for a Persona-backed account reports false when Pe
     global.fetch = originalFetch;
   }
 });
+
+// --- removeAccount / findAccountByImportSource (bulk importer rollback) --
+
+test("removeAccount deletes the account and reassigns activeAccountId if it was active", async () => {
+  const { accountManager } = await freshAccountManager();
+  // A brand-new state always starts with the built-in "default" account
+  // present alongside whatever addAccount() creates.
+  const b = await accountManager.addAccount("Account B");
+  await accountManager.selectAccount(b.id);
+
+  const removed = await accountManager.removeAccount(b.id);
+  assert.equal(removed, true);
+  assert.equal(await accountManager.getAccountById(b.id), null);
+  const state = await accountManager.getState();
+  assert.equal(state.activeAccountId, "default", "falls back to the remaining accounts[0] once the active one is removed");
+});
+
+test("removeAccount returns false for an unknown account id and refuses to remove the last remaining account", async () => {
+  const { accountManager } = await freshAccountManager();
+  assert.equal(await accountManager.removeAccount("does-not-exist"), false);
+  const only = await accountManager.getAllAccounts();
+  await assert.rejects(accountManager.removeAccount(only[0].id), /last remaining account/);
+});
+
+test("findAccountByImportSource matches by (platform, username) case-insensitively and returns null otherwise", async () => {
+  const { accountManager } = await freshAccountManager();
+  await accountManager.addAccount("account1", { importPlatform: "tiktok", importUsername: "Account1" });
+
+  const match = await accountManager.findAccountByImportSource("TikTok", "account1");
+  assert.ok(match);
+  assert.equal(match.importUsername, "Account1");
+
+  assert.equal(await accountManager.findAccountByImportSource("tiktok", "someone-else"), null);
+  assert.equal(await accountManager.findAccountByImportSource("instagram", "account1"), null);
+});
+
+test("importPlatform/importUsername survive a save/reload round trip, and a plain addAccount(name) omits them entirely", async () => {
+  const { accountManager, stateFile } = await freshAccountManager();
+  await accountManager.addAccount("account2", { importPlatform: "tiktok", importUsername: "account2" });
+  const plain = await accountManager.addAccount("Manually Added");
+  assert.deepEqual(Object.keys(plain).sort(), ["id", "name"]);
+
+  delete require.cache[require.resolve("../src/account-manager")];
+  const reloaded = require("../src/account-manager");
+  const match = await reloaded.findAccountByImportSource("tiktok", "account2");
+  assert.ok(match);
+
+  const raw = JSON.parse(await fs.readFile(stateFile, "utf8"));
+  const rawImported = raw.accounts.find((a) => a.importUsername === "account2");
+  assert.equal(rawImported.importPlatform, "tiktok");
+});
+
+test("many concurrent addAccount calls (as the bulk importer's worker pool issues) never lose an update on disk - final file matches final in-memory state", async () => {
+  const { accountManager, stateFile } = await freshAccountManager();
+
+  const names = Array.from({ length: 15 }, (_, i) => `Concurrent Account ${i}`);
+  await Promise.all(names.map((name) => accountManager.addAccount(name)));
+
+  const inMemory = await accountManager.getAllAccounts();
+  // +1 for the built-in default account.
+  assert.equal(inMemory.length, 16);
+
+  const onDisk = JSON.parse(await fs.readFile(stateFile, "utf8"));
+  assert.equal(
+    onDisk.accounts.length,
+    inMemory.length,
+    "the file on disk must reflect every account created concurrently, not just whichever write happened to land last"
+  );
+  assert.deepEqual(
+    onDisk.accounts.map((a) => a.id).sort(),
+    inMemory.map((a) => a.id).sort()
+  );
+});

@@ -255,6 +255,81 @@
           <span id="personaApiBannerText">Persona API is unavailable.</span>
         </div>
 
+        <div class="card full-width" style="margin-bottom:20px;">
+          <div class="card-title">Bulk Import Accounts
+            <span style="font-weight:400; color:var(--text-muted); font-size:12px;">from a supplier .txt file</span>
+          </div>
+
+          <div id="importUploadStep">
+            <div class="input-group" style="flex-wrap:wrap;">
+              <input type="file" id="importFileInput" accept=".txt,text/plain" class="control-input" style="max-width:320px;">
+              <button id="importPreviewBtn" class="control-btn-small primary"><i class="ph ph-upload-simple"></i> Preview import</button>
+            </div>
+            <div style="font-size:12px; color:var(--text-muted); margin-top:8px;">
+              The file is read in your browser and never written to disk on the server. Passwords and cookie values
+              are never shown here or sent anywhere except directly into Persona's own cookie import.
+            </div>
+            <div id="importUploadError" class="inline-banner error hidden" style="margin-top:10px;">
+              <i class="ph ph-warning-circle"></i>
+              <span id="importUploadErrorText"></span>
+            </div>
+          </div>
+
+          <div id="importPreviewStep" style="display:none;">
+            <div id="importPreviewSummary" style="margin:14px 0 8px; font-size:13px; color:var(--text-muted);"></div>
+            <div style="overflow-x:auto;">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Platform</th>
+                    <th>Username</th>
+                    <th>Email</th>
+                    <th>Password</th>
+                    <th>Cookies</th>
+                    <th>Note</th>
+                  </tr>
+                </thead>
+                <tbody id="importPreviewTableBody"></tbody>
+              </table>
+            </div>
+            <div class="input-group" style="margin-top:14px; flex-wrap:wrap;">
+              <select id="importConcurrencyInput" class="control-input" style="max-width:240px;">
+                <option value="1">Process 1 account at a time (safest)</option>
+                <option value="2" selected>Process 2 accounts at a time</option>
+                <option value="4">Process 4 accounts at a time</option>
+                <option value="8">Process 8 accounts at a time</option>
+              </select>
+              <button id="importConfirmBtn" class="control-btn-small success"><i class="ph ph-check-circle"></i> Confirm import</button>
+              <button id="importCancelBtn" class="control-btn-small danger"><i class="ph ph-x-circle"></i> Cancel</button>
+            </div>
+          </div>
+
+          <div id="importRunningStep" style="display:none; margin-top:14px; color:var(--text-muted); font-size:13px;">
+            <i class="ph ph-circle-notch"></i> Importing accounts - this attaches a real (headless) browser per
+            account to verify each session, so it can take a while for larger batches...
+          </div>
+
+          <div id="importResultsStep" style="display:none;">
+            <div id="importResultsSummary" style="margin:14px 0 8px; font-size:13px;"></div>
+            <div style="overflow-x:auto;">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Username</th>
+                    <th>AutoSocial</th>
+                    <th>Persona</th>
+                    <th>Cookies</th>
+                    <th>Session</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody id="importResultsTableBody"></tbody>
+              </table>
+            </div>
+            <button id="importDoneBtn" class="control-btn-small" style="margin-top:14px;"><i class="ph ph-arrow-counter-clockwise"></i> Import another file</button>
+          </div>
+        </div>
+
         <div class="card">
           <div class="card-title">AutoSocial Accounts</div>
           <div style="overflow-x:auto;">

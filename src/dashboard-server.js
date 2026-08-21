@@ -46,6 +46,24 @@ const {
   listPersonaProfiles,
 } = require("./persona-browser");
 const { computeAccountPersona, indexProfilesById } = require("./persona-overview");
+const { detectFormat } = require("./importers/detector");
+const { buildPreview, importBatch } = require("./importers/pipeline");
+const uploadStore = require("./importers/upload-store");
+
+// Upload content is a plain-text credentials file read client-side (see
+// web/app.js's use of FileReader) and posted as JSON, not multipart - this
+// avoids adding a file-upload dependency and means the raw bytes never
+// touch disk server-side (see importers/upload-store.js). Cap generous
+// enough for a 100+ account batch, small enough to bound memory.
+const MAX_IMPORT_FILE_BYTES = 2 * 1024 * 1024;
+// The shared express.json() body limit (below) must stay comfortably above
+// this - it bounds the whole JSON request (the `{"content": "..."}"`
+// wrapper plus any other fields), not just the inner content string. If the
+// two were equal, a content string right at MAX_IMPORT_FILE_BYTES would
+// still exceed the parser's limit once wrapped, so the request would be
+// rejected by body-parser's generic "request entity too large" before ever
+// reaching the route's own, friendlier size check below.
+const JSON_BODY_LIMIT_BYTES = MAX_IMPORT_FILE_BYTES + 64 * 1024;
 
 function openFolder(folderPath) {
   return new Promise((resolve, reject) => {
@@ -148,7 +166,12 @@ async function createServer() {
   const autoDownloader = new AutoDownloadController();
   const profileDownloader = new ProfileDownloadController();
 
-  app.use(express.json());
+  // Default body-parser limit (100kb) is too small for the import preview
+  // route's file content (see MAX_IMPORT_FILE_BYTES below, which enforces
+  // the real intended cap) - raised here, at the one shared parser, since
+  // this is a local single-operator dashboard, not a public multi-tenant
+  // service.
+  app.use(express.json({ limit: JSON_BODY_LIMIT_BYTES }));
   app.use(createDashboardRequestGuard());
   app.use(express.static(path.join(__dirname, "..", "web")));
 
@@ -418,6 +441,82 @@ async function createServer() {
       personaApiError,
       accounts: accountRows,
     });
+  });
+
+  // Bulk account import (see src/importers/). Two steps: preview (parse +
+  // detect format, return a secret-free summary, hold the real records
+  // in-memory only - see upload-store.js) then confirm (consume that
+  // held batch exactly once and run the real pipeline). Never echoes a
+  // password or cookie value back to the client at any point.
+
+  app.post("/api/import/preview", async (req, res) => {
+    try {
+      const content = req.body?.content;
+      if (typeof content !== "string" || !content.trim()) {
+        return res.status(400).json({ ok: false, error: "No file content was provided." });
+      }
+      if (Buffer.byteLength(content, "utf8") > MAX_IMPORT_FILE_BYTES) {
+        return res.status(400).json({ ok: false, error: "File is too large." });
+      }
+      const supplier = detectFormat(content);
+      if (!supplier) {
+        return res.status(400).json({
+          ok: false,
+          error: "This file's format was not recognized by any supported supplier adapter.",
+        });
+      }
+      const { records, errors } = supplier.parse(content);
+      if (!records.length) {
+        return res.status(400).json({
+          ok: false,
+          error: "No valid account records were found in that file.",
+          parseErrors: errors,
+        });
+      }
+      const preview = await buildPreview(records);
+      const importId = uploadStore.put(records, { format: supplier.id });
+      res.json({
+        ok: true,
+        importId,
+        format: supplier.id,
+        total: records.length,
+        parseErrors: errors,
+        preview,
+      });
+    } catch (error) {
+      res.status(400).json({ ok: false, error: error.message });
+    }
+  });
+
+  app.post("/api/import/confirm", async (req, res) => {
+    try {
+      const importId = req.body?.importId;
+      if (!importId) {
+        return res.status(400).json({ ok: false, error: "Missing importId." });
+      }
+      const entry = uploadStore.take(importId);
+      if (!entry) {
+        return res.status(400).json({
+          ok: false,
+          error: "This import has expired or was already processed. Upload the file again.",
+        });
+      }
+      const concurrency = Number(req.body?.concurrency) || undefined;
+      const report = await importBatch(entry.records, { concurrency });
+      for (const result of report.results) {
+        if (result.accountId) {
+          try {
+            await getDaemons(result.accountId);
+          } catch {
+            // Daemon pre-init is a convenience, not required for the
+            // account/profile/cookie import itself to have succeeded.
+          }
+        }
+      }
+      res.json({ ok: true, report });
+    } catch (error) {
+      res.status(400).json({ ok: false, error: error.message });
+    }
   });
 
   // Login endpoints (TikTok)

@@ -273,6 +273,84 @@ async function stopPersonaProfile(profileId) {
 }
 
 /**
+ * Creates a brand-new Persona profile via the real Persona API
+ * (POST /api/profiles) and returns it, stripped to the same safe fields as
+ * every other read in this module (see toSafeProfileSummary below).
+ *
+ * Persona mints the profile id server-side when none is supplied (confirmed
+ * against server.py's batch_create, which explicitly pops any incoming
+ * "id" with the comment "always mint a server-side id" - the single-create
+ * route relies on the same dash.save() behavior) - callers must never
+ * invent their own id.
+ */
+async function createPersonaProfile({ name, tags } = {}) {
+  const body = {};
+  if (name) body.name = name;
+  if (Array.isArray(tags)) body.tags = tags;
+  const created = await personaRequest("/api/profiles", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  if (!created || !created.id) {
+    throw new PersonaApiError("Persona did not return an id for the new profile.");
+  }
+  return toSafeProfileSummary(created);
+}
+
+/**
+ * Imports cookies into a Persona profile via the real Persona API
+ * (POST /api/profiles/{pid}/cookies). Persona's own importer (see
+ * engine/persona/cookies.py, read in full while designing this) accepts
+ * EITHER a raw text blob (Playwright storage-state JSON, browser-extension
+ * export JSON, or Netscape cookies.txt - it detects the format itself) or a
+ * `cookies` array of raw cookie objects - both are normalized identically
+ * on Persona's side, so this function is a thin, format-agnostic pass
+ * through and must stay that way.
+ *
+ * Requires the profile to NOT be running (Persona's own /cookies handler
+ * 409s otherwise) - callers must import cookies before ever attaching.
+ *
+ * Never logs `text`/`cookies` - both may contain live session secrets.
+ */
+async function importPersonaCookies(profileId, { text, cookies, clear = false } = {}) {
+  if (!profileId) {
+    throw new Error("Persona profileId is required.");
+  }
+  const body = { clear };
+  if (typeof text === "string" && text) {
+    body.text = text;
+  } else if (Array.isArray(cookies)) {
+    body.cookies = cookies;
+  } else {
+    throw new Error("importPersonaCookies requires text or a cookies array.");
+  }
+  return personaRequest(`/api/profiles/${encodeURIComponent(profileId)}/cookies`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+/**
+ * Permanently deletes a Persona profile (DELETE /api/profiles/{pid}) -
+ * Persona's own real rollback primitive (stops it first if running, then
+ * removes both the engine-side profile dir and the dashboard record). Used
+ * by the import pipeline to clean up an orphaned profile when a later
+ * pipeline step fails after the profile was already created - never used
+ * on a profile that might already be in real use.
+ */
+async function deletePersonaProfile(profileId) {
+  if (!profileId) return;
+  try {
+    await personaRequest(`/api/profiles/${encodeURIComponent(profileId)}`, {
+      method: "DELETE",
+    });
+  } catch (error) {
+    if (error instanceof PersonaApiError && error.status === 404) return;
+    throw error;
+  }
+}
+
+/**
  * Strips a real Persona profile record down to the fields that are ever
  * safe to leave this module - id/name/status/tags. Persona's real record
  * can carry a `proxy: {..., user, pass, ...}` block (confirmed against
@@ -333,4 +411,7 @@ module.exports = {
   stopPersonaProfile,
   listPersonaProfiles,
   personaProfileExists,
+  createPersonaProfile,
+  importPersonaCookies,
+  deletePersonaProfile,
 };

@@ -8,6 +8,9 @@ const {
   stopPersonaProfile,
   personaProfileExists,
   listPersonaProfiles,
+  createPersonaProfile,
+  importPersonaCookies,
+  deletePersonaProfile,
 } = require("../src/persona-browser");
 
 function withMockFetch(handler, fn) {
@@ -497,4 +500,149 @@ test("startPersonaBrowser propagates a real attach failure (e.g. profile not fou
       });
     }
   );
+});
+
+// ---------------------------------------------------------------------------
+// createPersonaProfile / importPersonaCookies / deletePersonaProfile - the
+// bulk importer's (src/importers/pipeline.js) three Persona-API primitives.
+// ---------------------------------------------------------------------------
+
+test("createPersonaProfile calls POST /api/profiles with name/tags and returns the safe id/name/status/tags shape", async () => {
+  let capturedUrl, capturedMethod, capturedBody;
+  await withMockFetch(
+    async (url, init) => {
+      capturedUrl = String(url);
+      capturedMethod = init.method;
+      capturedBody = JSON.parse(init.body);
+      return new Response(
+        JSON.stringify({ id: "new-profile-1", name: "autosocial-tiktok-acct1", status: "stopped", tags: ["autosocial-import"], engine: "playwright", _internal: "x" }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    },
+    async () => {
+      const profile = await createPersonaProfile({ name: "autosocial-tiktok-acct1", tags: ["autosocial-import"] });
+      assert.equal(capturedUrl, "http://127.0.0.1:8787/api/profiles");
+      assert.equal(capturedMethod, "POST");
+      assert.deepEqual(capturedBody, { name: "autosocial-tiktok-acct1", tags: ["autosocial-import"] });
+      assert.deepEqual(Object.keys(profile).sort(), ["id", "name", "status", "tags"]);
+      assert.equal(profile.id, "new-profile-1");
+    }
+  );
+});
+
+test("createPersonaProfile never sends an id - Persona must mint it server-side", async () => {
+  let capturedBody;
+  await withMockFetch(
+    async (_url, init) => {
+      capturedBody = JSON.parse(init.body);
+      return new Response(JSON.stringify({ id: "minted-id" }), { status: 200, headers: { "Content-Type": "application/json" } });
+    },
+    async () => {
+      await createPersonaProfile({ name: "no-id-profile" });
+      assert.ok(!("id" in capturedBody), "the request body must never include a client-chosen id");
+    }
+  );
+});
+
+test("createPersonaProfile throws clearly if Persona's response has no id", async () => {
+  await withMockFetch(
+    async () => new Response(JSON.stringify({ name: "no id here" }), { status: 200, headers: { "Content-Type": "application/json" } }),
+    async () => {
+      await assert.rejects(createPersonaProfile({ name: "x" }), /did not return an id/);
+    }
+  );
+});
+
+test("importPersonaCookies posts raw text to the real cookies endpoint and never logs/echoes it back out of scope", async () => {
+  let capturedUrl, capturedBody;
+  await withMockFetch(
+    async (url, init) => {
+      capturedUrl = String(url);
+      capturedBody = JSON.parse(init.body);
+      return new Response(JSON.stringify({ ok: true, imported: 3 }), { status: 200, headers: { "Content-Type": "application/json" } });
+    },
+    async () => {
+      const result = await importPersonaCookies("profile-x", { text: "sessionid=SECRET; sid_guard=ALSO_SECRET" });
+      assert.equal(capturedUrl, "http://127.0.0.1:8787/api/profiles/profile-x/cookies");
+      assert.equal(capturedBody.text, "sessionid=SECRET; sid_guard=ALSO_SECRET");
+      assert.equal(capturedBody.clear, false);
+      assert.deepEqual(result, { ok: true, imported: 3 });
+    }
+  );
+});
+
+test("importPersonaCookies accepts a cookies array as an alternative to text", async () => {
+  let capturedBody;
+  await withMockFetch(
+    async (_url, init) => {
+      capturedBody = JSON.parse(init.body);
+      return new Response(JSON.stringify({ ok: true, imported: 1 }), { status: 200, headers: { "Content-Type": "application/json" } });
+    },
+    async () => {
+      await importPersonaCookies("profile-y", { cookies: [{ name: "a", value: "1", domain: ".tiktok.com" }] });
+      assert.deepEqual(capturedBody.cookies, [{ name: "a", value: "1", domain: ".tiktok.com" }]);
+    }
+  );
+});
+
+test("importPersonaCookies rejects when given neither text nor a cookies array, and never calls the API", async () => {
+  let called = false;
+  await withMockFetch(
+    async () => { called = true; return new Response("{}", { status: 200 }); },
+    async () => {
+      await assert.rejects(importPersonaCookies("profile-z", {}), /requires text or a cookies array/);
+    }
+  );
+  assert.equal(called, false);
+});
+
+test("importPersonaCookies surfaces Persona's real 409 (profile still running) instead of silently failing", async () => {
+  await withMockFetch(
+    async () =>
+      new Response(JSON.stringify({ detail: "stop the profile first" }), { status: 409, headers: { "Content-Type": "application/json" } }),
+    async () => {
+      await assert.rejects(importPersonaCookies("running-profile", { text: "a=b" }), (error) => {
+        assert.ok(error instanceof PersonaApiError);
+        assert.equal(error.status, 409);
+        return true;
+      });
+    }
+  );
+});
+
+test("deletePersonaProfile calls the real DELETE endpoint for rollback", async () => {
+  let capturedUrl, capturedMethod;
+  await withMockFetch(
+    async (url, init) => {
+      capturedUrl = String(url);
+      capturedMethod = init.method;
+      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "Content-Type": "application/json" } });
+    },
+    async () => {
+      await deletePersonaProfile("orphan-profile");
+      assert.equal(capturedUrl, "http://127.0.0.1:8787/api/profiles/orphan-profile");
+      assert.equal(capturedMethod, "DELETE");
+    }
+  );
+});
+
+test("deletePersonaProfile treats a 404 (already gone) as success - rollback must be idempotent", async () => {
+  await withMockFetch(
+    async () => new Response(JSON.stringify({ detail: "not found" }), { status: 404, headers: { "Content-Type": "application/json" } }),
+    async () => {
+      await assert.doesNotReject(deletePersonaProfile("already-deleted"));
+    }
+  );
+});
+
+test("deletePersonaProfile is a no-op for an empty profileId", async () => {
+  let called = false;
+  await withMockFetch(
+    async () => { called = true; return new Response("{}", { status: 200 }); },
+    async () => {
+      await deletePersonaProfile();
+      await deletePersonaProfile("");
+    }
+  );
+  assert.equal(called, false);
 });

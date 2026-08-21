@@ -120,6 +120,23 @@ const UI = {
     personaAccountsTableBody: document.getElementById("personaAccountsTableBody"),
     personaProfilesTableBody: document.getElementById("personaProfilesTableBody"),
 
+    importFileInput: document.getElementById("importFileInput"),
+    importPreviewBtn: document.getElementById("importPreviewBtn"),
+    importUploadStep: document.getElementById("importUploadStep"),
+    importUploadError: document.getElementById("importUploadError"),
+    importUploadErrorText: document.getElementById("importUploadErrorText"),
+    importPreviewStep: document.getElementById("importPreviewStep"),
+    importPreviewSummary: document.getElementById("importPreviewSummary"),
+    importPreviewTableBody: document.getElementById("importPreviewTableBody"),
+    importConcurrencyInput: document.getElementById("importConcurrencyInput"),
+    importConfirmBtn: document.getElementById("importConfirmBtn"),
+    importCancelBtn: document.getElementById("importCancelBtn"),
+    importRunningStep: document.getElementById("importRunningStep"),
+    importResultsStep: document.getElementById("importResultsStep"),
+    importResultsSummary: document.getElementById("importResultsSummary"),
+    importResultsTableBody: document.getElementById("importResultsTableBody"),
+    importDoneBtn: document.getElementById("importDoneBtn"),
+
     ttRunBtn: document.getElementById("ttRunBtn"),
     ttStartBtn: document.getElementById("ttStartBtn"),
     ttStopBtn: document.getElementById("ttStopBtn"),
@@ -480,6 +497,18 @@ const UI = {
     document.addEventListener("autosocial:viewchange", (event) => {
       if (event.detail?.viewName === "persona") this.refreshPersona();
     });
+    if (this.els.importPreviewBtn) {
+      this.els.importPreviewBtn.addEventListener("click", () => this.handleImportPreview());
+    }
+    if (this.els.importConfirmBtn) {
+      this.els.importConfirmBtn.addEventListener("click", () => this.handleImportConfirm());
+    }
+    if (this.els.importCancelBtn) {
+      this.els.importCancelBtn.addEventListener("click", () => this.resetImportFlow());
+    }
+    if (this.els.importDoneBtn) {
+      this.els.importDoneBtn.addEventListener("click", () => this.resetImportFlow());
+    }
 
     if (this.els.uniqStartBtn) {
       this.els.uniqStartBtn.addEventListener("click", () => this.handleUniquifierStart());
@@ -2038,6 +2067,144 @@ const UI = {
           <td>${actionsCell}</td>
         </tr>`;
       })
+      .join("");
+  },
+
+  // ---------------------------------------------------------------------
+  // Bulk account import (see src/importers/). Two-step flow: preview (the
+  // file is read client-side via FileReader and posted as text - never as
+  // a multipart upload - so it never touches disk server-side) then
+  // confirm, which actually creates accounts/Persona profiles. Nothing
+  // here ever renders a password or a cookie value; the backend's preview
+  // response only ever contains the safe fields from
+  // src/importers/normalize.js#toSafePreview.
+  // ---------------------------------------------------------------------
+
+  resetImportFlow() {
+    this.importId = null;
+    if (this.els.importFileInput) this.els.importFileInput.value = "";
+    if (this.els.importUploadStep) this.els.importUploadStep.style.display = "";
+    if (this.els.importPreviewStep) this.els.importPreviewStep.style.display = "none";
+    if (this.els.importRunningStep) this.els.importRunningStep.style.display = "none";
+    if (this.els.importResultsStep) this.els.importResultsStep.style.display = "none";
+    this.hideImportError();
+  },
+
+  showImportError(message) {
+    if (!this.els.importUploadError || !this.els.importUploadErrorText) return;
+    this.els.importUploadErrorText.textContent = message;
+    this.els.importUploadError.classList.remove("hidden");
+  },
+
+  hideImportError() {
+    if (this.els.importUploadError) this.els.importUploadError.classList.add("hidden");
+  },
+
+  readFileAsText(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ""));
+      reader.onerror = () => reject(new Error("Could not read that file."));
+      reader.readAsText(file);
+    });
+  },
+
+  async handleImportPreview() {
+    this.hideImportError();
+    const file = this.els.importFileInput?.files?.[0];
+    if (!file) {
+      this.showImportError("Choose a supplier .txt file first.");
+      return;
+    }
+
+    this.els.importPreviewBtn.disabled = true;
+    this.els.importPreviewBtn.innerHTML = '<i class="ph ph-circle-notch"></i> Reading file...';
+    try {
+      const content = await this.readFileAsText(file);
+      const result = await API.post("/api/import/preview", { content });
+      this.importId = result.importId;
+      this.renderImportPreview(result);
+      this.els.importUploadStep.style.display = "none";
+      this.els.importPreviewStep.style.display = "";
+    } catch (err) {
+      this.showImportError(err.message);
+    } finally {
+      this.els.importPreviewBtn.disabled = false;
+      this.els.importPreviewBtn.innerHTML = '<i class="ph ph-upload-simple"></i> Preview import';
+    }
+  },
+
+  renderImportPreview(result) {
+    if (!this.els.importPreviewTableBody) return;
+    const skippable = result.preview.filter((r) => r.duplicateInBatch || r.alreadyImported).length;
+    this.els.importPreviewSummary.textContent =
+      `Detected format: ${result.format}. ${result.total} account(s) found` +
+      (result.parseErrors?.length ? `, ${result.parseErrors.length} line(s) could not be parsed` : "") +
+      (skippable ? `, ${skippable} already imported / duplicated in this file (will be skipped)` : "") +
+      ". No passwords or cookie values are ever shown here.";
+
+    this.els.importPreviewTableBody.innerHTML = result.preview
+      .map((r) => {
+        let note = "";
+        if (r.alreadyImported) note = '<span class="status-badge locked">Already imported</span>';
+        else if (r.duplicateInBatch) note = '<span class="status-badge locked">Duplicate in file</span>';
+        return `
+        <tr>
+          <td>${escapeHtml(r.platform || "-")}</td>
+          <td>${escapeHtml(r.username || "-")}</td>
+          <td>${escapeHtml(r.emailMasked || "-")}</td>
+          <td>${r.hasPassword ? '<i class="ph ph-check" style="color:var(--status-good);"></i>' : "-"}</td>
+          <td>${r.hasCookies ? `<i class="ph ph-check" style="color:var(--status-good);"></i> ${r.cookieCount ?? ""}` : "-"}</td>
+          <td>${note}</td>
+        </tr>`;
+      })
+      .join("");
+  },
+
+  async handleImportConfirm() {
+    if (!this.importId) return;
+    this.els.importPreviewStep.style.display = "none";
+    this.els.importRunningStep.style.display = "";
+    try {
+      const concurrency = Number(this.els.importConcurrencyInput?.value) || 2;
+      const result = await API.post("/api/import/confirm", { importId: this.importId, concurrency });
+      this.renderImportResults(result.report);
+      this.els.importRunningStep.style.display = "none";
+      this.els.importResultsStep.style.display = "";
+      await this.refreshPersona();
+    } catch (err) {
+      this.els.importRunningStep.style.display = "none";
+      this.els.importPreviewStep.style.display = "";
+      alert(`Import failed: ${err.message}`);
+    }
+  },
+
+  renderImportResults(report) {
+    if (!this.els.importResultsTableBody) return;
+    this.els.importResultsSummary.innerHTML =
+      `Total ${report.total} - ` +
+      `<span style="color:var(--status-good);">${report.successful} ready</span>, ` +
+      `<span style="color:var(--status-warn);">${report.needsLogin} need login</span>, ` +
+      `<span style="color:var(--status-bad);">${report.failed} failed</span>` +
+      (report.skipped ? `, ${report.skipped} skipped (duplicate)` : "");
+
+    const statusBadge = (status) => {
+      if (status === "READY") return '<span class="status-badge active">READY</span>';
+      if (status === "NEEDS_LOGIN") return '<span class="status-badge locked">NEEDS LOGIN</span>';
+      if (status === "SKIPPED_DUPLICATE") return '<span class="status-badge">SKIPPED</span>';
+      return '<span class="status-badge error">FAILED</span>';
+    };
+
+    this.els.importResultsTableBody.innerHTML = report.results
+      .map((r) => `
+        <tr>
+          <td>${escapeHtml(r.username || "-")}</td>
+          <td>${escapeHtml(r.autosocial || "-")}</td>
+          <td>${escapeHtml(r.persona || "-")}</td>
+          <td>${escapeHtml(r.cookies || "-")}</td>
+          <td>${escapeHtml(r.session || "-")}</td>
+          <td>${statusBadge(r.status)}</td>
+        </tr>`)
       .join("");
   },
 
