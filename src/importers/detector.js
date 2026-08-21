@@ -3,11 +3,10 @@
 // Adding a new supplier format means adding one adapter here - never
 // touching the import pipeline (src/importers/pipeline.js) or the Dashboard
 // routes that call it. Each adapter exports { id, test(text), parse(text) }
-// (see src/importers/suppliers/tiktok-lines.js for the contract and its own
-// placeholder-format caveat).
-const tiktokLines = require("./suppliers/tiktok-lines");
+// (see src/importers/suppliers/tiktok-pipe7.js for the contract).
+const tiktokPipe7 = require("./suppliers/tiktok-pipe7");
 
-const SUPPLIERS = [tiktokLines];
+const SUPPLIERS = [tiktokPipe7];
 
 // Returns the first matching adapter, or null if nothing recognizes the
 // file. Order matters only if two adapters could both match the same text;

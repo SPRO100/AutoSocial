@@ -374,3 +374,45 @@ test("buildPreview flags an in-batch duplicate and a previously-imported account
   const serialized = JSON.stringify(preview);
   assert.ok(!serialized.includes("shh"));
 });
+
+// --- end-to-end against the real supplier format's fixture --------------
+// Full chain: detector -> tiktok-pipe7 adapter -> buildPreview, using the
+// real fixture FILE (test/fixtures/tiktok-pipe7-sample.txt - fake data,
+// same shape as the actual confirmed supplier format including its
+// marketing header). Directly covers "a file with two accounts must
+// produce a preview of exactly two" and "no secret ever reaches preview".
+
+test("the real supplier fixture (header + two accounts) detects, parses to exactly two records, and previews with zero leaked secrets", async () => {
+  const { detectFormat } = require("../src/importers/detector");
+  const fixturePath = path.join(__dirname, "fixtures", "tiktok-pipe7-sample.txt");
+  const content = await fs.readFile(fixturePath, "utf8");
+
+  const supplier = detectFormat(content);
+  assert.ok(supplier, "the real fixture must be auto-detected without asking the user to pick a format");
+  assert.equal(supplier.id, "tiktok-pipe7-v1");
+
+  const { records, errors } = supplier.parse(content);
+  assert.equal(errors.length, 0, "the marketing header must never be reported as a parse error");
+  assert.equal(records.length, 2, "a file with two accounts must produce exactly two records");
+
+  const { pipeline } = await freshPipeline();
+  const preview = await pipeline.buildPreview(records);
+  assert.equal(preview.length, 2, "and exactly two preview entries");
+  assert.equal(preview[0].username, "fakeacct_one");
+  assert.equal(preview[1].username, "fakeacct_two");
+  for (const entry of preview) {
+    assert.equal(entry.hasPassword, true);
+    assert.equal(entry.hasEmail, true);
+    assert.equal(entry.hasEmailPassword, true);
+    assert.equal(entry.hasAuthToken, true);
+    assert.equal(entry.hasCookies, true);
+    assert.equal(entry.cookieCount, 5);
+  }
+
+  const serialized = JSON.stringify(preview);
+  assert.ok(!serialized.includes("FakePass"), "no password may ever reach the preview");
+  assert.ok(!serialized.includes("FakeMailPass"), "no email password may ever reach the preview");
+  assert.ok(!serialized.includes("fake-auth-token"), "no auth token may ever reach the preview");
+  assert.ok(!serialized.includes("fakeSESSIONVALUE"), "no cookie value may ever reach the preview");
+  assert.ok(!serialized.includes("fakeacct_one@example.com"), "the full raw email must never reach the preview, only the masked form");
+});

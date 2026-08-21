@@ -15,6 +15,7 @@ const NORMALIZED_FIELDS = [
   "password",
   "email",
   "emailPassword",
+  "authToken",
   "externalId",
   "cookies",
 ];
@@ -77,8 +78,9 @@ function countCookies(raw) {
 
 // The ONLY view of a record that may ever reach the Dashboard API response
 // or frontend before import is confirmed. No password, no email password,
-// no cookie values - ever. See dashboard-server.js's import-preview route,
-// which must never send anything but records already passed through this.
+// no auth token, no cookie values - ever. See dashboard-server.js's
+// import-preview route, which must never send anything but records already
+// passed through this.
 function toSafePreview(record) {
   return {
     platform: record.platform || null,
@@ -88,6 +90,7 @@ function toSafePreview(record) {
     hasPassword: Boolean(record.password),
     hasEmail: Boolean(record.email),
     hasEmailPassword: Boolean(record.emailPassword),
+    hasAuthToken: Boolean(record.authToken),
     hasCookies: Boolean(record.cookies),
     cookieCount: countCookies(record.cookies),
   };

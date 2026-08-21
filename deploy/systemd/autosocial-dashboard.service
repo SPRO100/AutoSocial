@@ -5,7 +5,7 @@
 # Runs AutoSocial's dashboard API (src/dashboard-server.js) as a persistent
 # backing service for CONTENT-OS (/opt/content-os, port 7652). CONTENT-OS's
 # server-side integration adapter (src/server/integrations/autosocial.ts)
-# is the only intended caller — this binds to loopback only (see
+# is the only intended caller  -  this binds to loopback only (see
 # src/config.js's DASHBOARD_HOST default) and is never exposed publicly,
 # mirroring persona-api.service's own loopback-only setup. HEADLESS=true
 # because this host has no display; Persona-driven session verification

@@ -7,12 +7,12 @@ test.beforeEach(() => uploadStore._clearAllForTests());
 
 test("put then take returns the exact records held, and take is single-use", () => {
   const records = [{ platform: "tiktok", username: "a", password: "secret" }];
-  const importId = uploadStore.put(records, { format: "tiktok-lines-v1" });
+  const importId = uploadStore.put(records, { format: "tiktok-pipe7-v1" });
   assert.equal(uploadStore.size(), 1);
 
   const first = uploadStore.take(importId);
   assert.deepEqual(first.records, records);
-  assert.equal(first.meta.format, "tiktok-lines-v1");
+  assert.equal(first.meta.format, "tiktok-pipe7-v1");
 
   const second = uploadStore.take(importId);
   assert.equal(second, null, "a second take() for the same importId must return null - single use only");

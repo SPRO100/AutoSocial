@@ -49,25 +49,28 @@ test("countCookies returns null (not 0) for empty/unrecognizable input, never th
   assert.equal(countCookies(undefined), null);
 });
 
-test("toSafePreview never includes password, emailPassword, or the raw cookie value - even when present on the record", () => {
+test("toSafePreview never includes password, emailPassword, authToken, or the raw cookie value - even when present on the record", () => {
   const record = createRecord({
     platform: "tiktok",
     username: "leak-check",
     password: "SuperSecretPassword123",
     email: "leak-check@example.com",
     emailPassword: "MailboxSecret456",
+    authToken: "eyJhbGciOiJIUzI1NiJ9.FAKE.TOKEN",
     cookies: "sessionid=TOP_SECRET_SESSION_TOKEN",
   });
   const preview = toSafePreview(record);
   const serialized = JSON.stringify(preview);
   assert.ok(!serialized.includes("SuperSecretPassword123"));
   assert.ok(!serialized.includes("MailboxSecret456"));
+  assert.ok(!serialized.includes("eyJhbGciOiJIUzI1NiJ9.FAKE.TOKEN"));
   assert.ok(!serialized.includes("TOP_SECRET_SESSION_TOKEN"));
   assert.ok(!serialized.includes("leak-check@example.com"));
   assert.deepEqual(Object.keys(preview).sort(), [
     "cookieCount",
     "emailMasked",
     "externalId",
+    "hasAuthToken",
     "hasCookies",
     "hasEmail",
     "hasEmailPassword",
@@ -78,6 +81,7 @@ test("toSafePreview never includes password, emailPassword, or the raw cookie va
   assert.equal(preview.hasPassword, true);
   assert.equal(preview.hasEmail, true);
   assert.equal(preview.hasEmailPassword, true);
+  assert.equal(preview.hasAuthToken, true);
   assert.equal(preview.hasCookies, true);
   assert.equal(preview.username, "leak-check");
 });

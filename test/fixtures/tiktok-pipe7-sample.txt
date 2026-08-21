@@ -1,0 +1,8 @@
+=================================================
+   PREMIUM TIKTOK ACCOUNTS - BATCH #245
+   100% checked, warmed up, ready to use.
+   Support: t.me/fake_seller_handle
+=================================================
+
+fakeacct_one|FakePass!1|fakeacct_one@example.com|FakeMailPass1|fake-auth-token-AAA111|ext-2001|sessionid=fakeSESSIONVALUE1; sessionid_ss=fakeSESSIONSS1; sid_tt=fakeSIDTT1; uid_tt=fakeUIDTT1; ttwid=fakeTTWID1
+fakeacct_two|FakePass!2|fakeacct_two@example.com|FakeMailPass2|fake-auth-token-BBB222|ext-2002|sessionid=fakeSESSIONVALUE2; sessionid_ss=fakeSESSIONSS2; sid_tt=fakeSIDTT2; uid_tt=fakeUIDTT2; ttwid=fakeTTWID2
