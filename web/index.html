@@ -84,6 +84,10 @@
           <i class="ph ph-users"></i>
           <span>Accounts</span>
         </button>
+        <button class="nav-item" data-view="persona">
+          <i class="ph ph-identification-card"></i>
+          <span>Persona</span>
+        </button>
         <button class="nav-item" data-view="settings">
           <i class="ph ph-gear"></i>
           <span>Settings</span>
@@ -234,6 +238,62 @@
               <!-- JS Populates this -->
             </tbody>
           </table>
+        </div>
+      </section>
+
+      <!-- View: Persona -->
+      <section id="view-persona" class="view-section">
+        <header class="view-header">
+          <h2>Persona Integration</h2>
+          <button id="personaRefreshBtn" class="control-btn-small">
+            <i class="ph ph-arrows-clockwise"></i> Refresh
+          </button>
+        </header>
+
+        <div id="personaApiBanner" class="inline-banner warn hidden">
+          <i class="ph ph-warning"></i>
+          <span id="personaApiBannerText">Persona API is unavailable.</span>
+        </div>
+
+        <div class="card">
+          <div class="card-title">AutoSocial Accounts</div>
+          <div style="overflow-x:auto;">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Account</th>
+                  <th>Linked Persona Profile</th>
+                  <th>Persona Status</th>
+                  <th>Saved Session</th>
+                  <th>Platforms</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="personaAccountsTableBody">
+                <!-- JS populates this -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card full-width" style="margin-top:20px;">
+          <div class="card-title">Persona Profiles</div>
+          <div style="overflow-x:auto;">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Profile ID</th>
+                  <th>Status</th>
+                  <th>Tags</th>
+                  <th>Linked to</th>
+                </tr>
+              </thead>
+              <tbody id="personaProfilesTableBody">
+                <!-- JS populates this -->
+              </tbody>
+            </table>
+          </div>
         </div>
       </section>
 

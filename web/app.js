@@ -1,7 +1,23 @@
+// Every backend route in this app that reports a real, specific failure
+// (e.g. "Persona profile X is already linked to account Y") does so via
+// {ok:false, error:"..."} in the response body, at a non-2xx status.
+// Surfacing that real message here - instead of a generic "API Error:
+// 400" - is what makes those specific messages ever reach the operator.
+async function throwWithBackendMessage(res) {
+  let detail = null;
+  try {
+    const body = await res.clone().json();
+    detail = body?.error || null;
+  } catch {
+    // Non-JSON or empty body - fall through to the generic message.
+  }
+  throw new Error(detail || `API Error: ${res.status}`);
+}
+
 const API = {
   async get(endpoint) {
     const res = await fetch(endpoint);
-    if (!res.ok) throw new Error(`API Error: ${res.status}`);
+    if (!res.ok) await throwWithBackendMessage(res);
     return res.json();
   },
   async post(endpoint, body) {
@@ -13,7 +29,7 @@ const API = {
       options.body = JSON.stringify(body);
     }
     const res = await fetch(endpoint, options);
-    if (!res.ok) throw new Error(`API Error: ${res.status}`);
+    if (!res.ok) await throwWithBackendMessage(res);
     return res.json();
   },
 };
@@ -64,6 +80,11 @@ const UI = {
     youtube: false,
   },
 
+  personaOverview: null,
+  personaProfiles: [],
+  personaLinkingAccountId: null,
+  personaBusyAccountIds: new Set(),
+
   els: {
     brandSelect: document.getElementById("brandSelect"),
     addBrandBtn: document.getElementById("addBrandBtn"),
@@ -93,6 +114,11 @@ const UI = {
     logsContainer: document.getElementById("logsContainer"),
     ttLogsContainer: document.getElementById("ttLogsContainer"),
     accountsTableBody: document.getElementById("accountsTableBody"),
+    personaRefreshBtn: document.getElementById("personaRefreshBtn"),
+    personaApiBanner: document.getElementById("personaApiBanner"),
+    personaApiBannerText: document.getElementById("personaApiBannerText"),
+    personaAccountsTableBody: document.getElementById("personaAccountsTableBody"),
+    personaProfilesTableBody: document.getElementById("personaProfilesTableBody"),
 
     ttRunBtn: document.getElementById("ttRunBtn"),
     ttStartBtn: document.getElementById("ttStartBtn"),
@@ -443,6 +469,17 @@ const UI = {
         this.handleAccountsTableClick(event)
       );
     }
+    if (this.els.personaRefreshBtn) {
+      this.els.personaRefreshBtn.addEventListener("click", () => this.refreshPersona());
+    }
+    if (this.els.personaAccountsTableBody) {
+      this.els.personaAccountsTableBody.addEventListener("click", (event) =>
+        this.handlePersonaAccountsClick(event)
+      );
+    }
+    document.addEventListener("autosocial:viewchange", (event) => {
+      if (event.detail?.viewName === "persona") this.refreshPersona();
+    });
 
     if (this.els.uniqStartBtn) {
       this.els.uniqStartBtn.addEventListener("click", () => this.handleUniquifierStart());
@@ -1851,6 +1888,266 @@ const UI = {
         }
       )
       .join("");
+  },
+
+  // ---------------------------------------------------------------------
+  // Persona integration - reuses the existing /api/accounts/persona*,
+  // /api/persona/* endpoints exclusively. This file never calls Persona's
+  // own API directly, never opens a CDP connection itself, and never
+  // duplicates any of persona-browser.js/browser-session.js's logic - it
+  // only renders what those backend endpoints already computed and posts
+  // the same account-scoped actions any other client of those routes
+  // would.
+  // ---------------------------------------------------------------------
+
+  PERSONA_PLATFORM_META: [
+    { key: "tiktok", label: "TikTok", icon: "ph-tiktok-logo" },
+    { key: "instagram", label: "Instagram", icon: "ph-instagram-logo" },
+    { key: "youtube", label: "YouTube", icon: "ph-youtube-logo" },
+  ],
+
+  async refreshPersona() {
+    if (this.els.personaRefreshBtn) {
+      this.els.personaRefreshBtn.disabled = true;
+      this.els.personaRefreshBtn.innerHTML = '<i class="ph ph-circle-notch"></i> Checking';
+    }
+    try {
+      const [overview, profilesResult] = await Promise.all([
+        API.get("/api/persona/overview"),
+        API.get("/api/persona/profiles"),
+      ]);
+      this.personaOverview = overview;
+      this.personaProfiles = profilesResult.profiles || [];
+      this.renderPersonaApiBanner();
+      this.renderPersonaAccounts();
+      this.renderPersonaProfiles();
+    } catch (err) {
+      this.personaOverview = null;
+      this.personaProfiles = [];
+      if (this.els.personaAccountsTableBody) {
+        this.els.personaAccountsTableBody.innerHTML = `<tr><td colspan="6">Could not load Persona data: ${escapeHtml(err.message)}</td></tr>`;
+      }
+      if (this.els.personaProfilesTableBody) {
+        this.els.personaProfilesTableBody.innerHTML = "";
+      }
+    } finally {
+      if (this.els.personaRefreshBtn) {
+        this.els.personaRefreshBtn.disabled = false;
+        this.els.personaRefreshBtn.innerHTML = '<i class="ph ph-arrows-clockwise"></i> Refresh';
+      }
+    }
+  },
+
+  renderPersonaApiBanner() {
+    if (!this.els.personaApiBanner || !this.els.personaApiBannerText) return;
+    if (this.personaOverview && this.personaOverview.personaApiAvailable === false) {
+      this.els.personaApiBannerText.textContent =
+        `Persona API is unavailable (${this.personaOverview.personaApiError || "unknown error"}). ` +
+        `Linked accounts show unknown status until it's reachable again.`;
+      this.els.personaApiBanner.classList.remove("hidden");
+    } else {
+      this.els.personaApiBanner.classList.add("hidden");
+    }
+  },
+
+  renderPersonaAccounts() {
+    if (!this.els.personaAccountsTableBody) return;
+    const overview = this.personaOverview;
+    if (!overview || !Array.isArray(overview.accounts)) {
+      this.els.personaAccountsTableBody.innerHTML = `<tr><td colspan="6" style="color:var(--text-muted);">No data loaded yet.</td></tr>`;
+      return;
+    }
+
+    const linkedProfileIds = new Set(
+      overview.accounts.filter((a) => a.personaProfileId).map((a) => a.personaProfileId)
+    );
+
+    this.els.personaAccountsTableBody.innerHTML = overview.accounts
+      .map((account) => {
+        const busy = this.personaBusyAccountIds.has(account.id);
+        const linking = this.personaLinkingAccountId === account.id;
+
+        let profileCell = '<span style="color:var(--text-muted);">Not linked</span>';
+        let statusCell = '<span style="color:var(--text-muted);">-</span>';
+        let savedCell = '<span style="color:var(--text-muted);">-</span>';
+
+        if (account.personaProfileId) {
+          const p = account.persona || {};
+          const idLabel = `<div class="mono" style="font-size:11px; color:var(--text-muted);">${escapeHtml(account.personaProfileId)}</div>`;
+          const nameLabel = p.found === false ? "Profile not found in Persona" : (p.name || account.personaProfileId);
+          profileCell = `<div>${escapeHtml(nameLabel)}</div>${idLabel}`;
+
+          if (p.status === "running") statusCell = '<span class="status-badge active">Running</span>';
+          else if (p.status === "stopped") statusCell = '<span class="status-badge">Stopped</span>';
+          else if (p.found === false) statusCell = '<span class="status-badge error">Deleted in Persona</span>';
+          else statusCell = '<span class="status-badge locked">Unknown</span>';
+
+          const platformStates = this.PERSONA_PLATFORM_META.map((m) => account.platforms?.[m.key]?.saved);
+          if (platformStates.some((s) => s === null)) {
+            savedCell = '<span class="status-badge locked">Unknown</span>';
+          } else {
+            savedCell = platformStates.some((s) => s === true)
+              ? '<span class="status-badge active">Yes</span>'
+              : '<span class="status-badge">No</span>';
+          }
+        }
+
+        const platformsCell = this.PERSONA_PLATFORM_META.map((m) => {
+          const saved = account.platforms?.[m.key]?.saved;
+          const symbol = saved === true
+            ? '<i class="ph ph-check-circle" style="color:var(--status-good);"></i>'
+            : saved === null
+              ? '<i class="ph ph-question" style="color:var(--text-muted);"></i>'
+              : '<i class="ph ph-x-circle" style="color:var(--text-muted);"></i>';
+          return `<span title="${escapeHtml(m.label)}" style="margin-right:10px; white-space:nowrap;"><i class="ph ${m.icon}"></i> ${symbol}</span>`;
+        }).join("");
+
+        let actionsCell;
+        if (linking) {
+          const options = this.personaProfiles
+            .filter((p) => !linkedProfileIds.has(p.id) || p.id === account.personaProfileId)
+            .map((p) => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name || p.id)} (${escapeHtml(p.id)})</option>`)
+            .join("");
+          actionsCell = `
+          <div class="persona-link-row">
+            <select class="control-input persona-link-select" data-account-id="${escapeHtml(account.id)}" style="min-width:200px;">
+              <option value="">Select profile...</option>
+              ${options}
+            </select>
+            <button class="control-btn-small primary" data-account-id="${escapeHtml(account.id)}" data-action="confirm-link">Confirm</button>
+            <button class="control-btn-small" data-account-id="${escapeHtml(account.id)}" data-action="cancel-link">Cancel</button>
+          </div>`;
+        } else if (account.personaProfileId) {
+          actionsCell = `
+          <div class="persona-link-row">
+            <button class="control-btn-small success" data-account-id="${escapeHtml(account.id)}" data-action="start" ${busy ? "disabled" : ""}><i class="ph ph-play-circle"></i> Start</button>
+            <button class="control-btn-small danger" data-account-id="${escapeHtml(account.id)}" data-action="stop" ${busy ? "disabled" : ""}><i class="ph ph-stop-circle"></i> Stop</button>
+            <button class="control-btn-small" data-account-id="${escapeHtml(account.id)}" data-action="unlink" ${busy ? "disabled" : ""}><i class="ph ph-link-break"></i> Unlink</button>
+          </div>`;
+        } else {
+          actionsCell = `<button class="control-btn-small primary" data-account-id="${escapeHtml(account.id)}" data-action="link" ${busy ? "disabled" : ""}><i class="ph ph-link"></i> Link Persona Profile</button>`;
+        }
+
+        return `
+        <tr>
+          <td>${escapeHtml(account.name)}</td>
+          <td>${profileCell}</td>
+          <td>${statusCell}</td>
+          <td>${savedCell}</td>
+          <td>${platformsCell}</td>
+          <td>${actionsCell}</td>
+        </tr>`;
+      })
+      .join("");
+  },
+
+  renderPersonaProfiles() {
+    if (!this.els.personaProfilesTableBody) return;
+    const profiles = this.personaProfiles || [];
+    const linkedByProfileId = new Map();
+    if (this.personaOverview && Array.isArray(this.personaOverview.accounts)) {
+      for (const account of this.personaOverview.accounts) {
+        if (account.personaProfileId) linkedByProfileId.set(account.personaProfileId, account.name);
+      }
+    }
+
+    if (!profiles.length) {
+      this.els.personaProfilesTableBody.innerHTML = `<tr><td colspan="5" style="color:var(--text-muted);">No Persona profiles found (or Persona API is unavailable).</td></tr>`;
+      return;
+    }
+
+    this.els.personaProfilesTableBody.innerHTML = profiles
+      .map((profile) => {
+        const statusBadge = profile.status === "running"
+          ? '<span class="status-badge active">Running</span>'
+          : '<span class="status-badge">Stopped</span>';
+        const tags = Array.isArray(profile.tags) && profile.tags.length
+          ? escapeHtml(profile.tags.join(", "))
+          : '<span style="color:var(--text-muted);">-</span>';
+        const linkedTo = linkedByProfileId.get(profile.id);
+        return `
+        <tr>
+          <td>${escapeHtml(profile.name || "-")}</td>
+          <td class="mono" style="font-size:12px;">${escapeHtml(profile.id)}</td>
+          <td>${statusBadge}</td>
+          <td>${tags}</td>
+          <td>${linkedTo ? escapeHtml(linkedTo) : '<span style="color:var(--text-muted);">Not linked</span>'}</td>
+        </tr>`;
+      })
+      .join("");
+  },
+
+  async handlePersonaAccountsClick(event) {
+    const button = event.target.closest("button[data-account-id][data-action]");
+    if (!button) return;
+    const accountId = button.dataset.accountId;
+    const action = button.dataset.action;
+
+    if (action === "link") {
+      this.personaLinkingAccountId = accountId;
+      this.renderPersonaAccounts();
+      return;
+    }
+    if (action === "cancel-link") {
+      this.personaLinkingAccountId = null;
+      this.renderPersonaAccounts();
+      return;
+    }
+    if (action === "confirm-link") {
+      const row = button.closest("tr");
+      const select = row ? row.querySelector("select.persona-link-select") : null;
+      const profileId = select ? select.value : "";
+      if (!profileId) {
+        alert("Select a Persona profile first.");
+        return;
+      }
+      try {
+        await API.post("/api/accounts/persona", { accountId, personaProfileId: profileId });
+        this.personaLinkingAccountId = null;
+        await this.refreshPersona();
+      } catch (err) {
+        alert(`Could not link profile: ${err.message}`);
+      }
+      return;
+    }
+    if (action === "unlink") {
+      if (!confirm("Unlink this Persona profile? The account will fall back to AutoSocial's own browser profile.")) return;
+      try {
+        await API.post("/api/accounts/persona/clear", { accountId });
+        await this.refreshPersona();
+      } catch (err) {
+        alert(`Could not unlink profile: ${err.message}`);
+      }
+      return;
+    }
+    if (action === "start") {
+      this.personaBusyAccountIds.add(accountId);
+      this.renderPersonaAccounts();
+      try {
+        await API.post("/api/persona/attach", { accountId });
+        await this.refreshPersona();
+      } catch (err) {
+        alert(`Could not start Persona browser: ${err.message}`);
+      } finally {
+        this.personaBusyAccountIds.delete(accountId);
+        this.renderPersonaAccounts();
+      }
+      return;
+    }
+    if (action === "stop") {
+      this.personaBusyAccountIds.add(accountId);
+      this.renderPersonaAccounts();
+      try {
+        await API.post("/api/accounts/persona/stop", { accountId });
+        await this.refreshPersona();
+      } catch (err) {
+        alert(`Could not stop Persona browser: ${err.message}`);
+      } finally {
+        this.personaBusyAccountIds.delete(accountId);
+        this.renderPersonaAccounts();
+      }
+      return;
+    }
   },
 
   async handleAutoDownloadAction(endpoint) {

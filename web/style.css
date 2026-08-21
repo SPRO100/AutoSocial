@@ -620,6 +620,37 @@ select.brand-select {
   color: var(--status-bad);
 }
 
+.inline-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  border-radius: 8px;
+  font-size: 13px;
+  margin-bottom: 16px;
+}
+
+.inline-banner.hidden {
+  display: none;
+}
+
+.inline-banner.warn {
+  background: var(--status-warn-bg);
+  color: var(--status-warn);
+}
+
+.inline-banner.error {
+  background: var(--status-bad-bg);
+  color: var(--status-bad);
+}
+
+.persona-link-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
 /* Forms */
 .form-group {
   margin-bottom: 16px;

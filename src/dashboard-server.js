@@ -37,8 +37,15 @@ const {
   setPersonaProfileId,
   clearPersonaProfileId,
   getPersonaProfileId,
+  hasSavedPlatformSession,
+  PLATFORMS,
 } = require("./account-manager");
-const { stopPersonaProfile } = require("./persona-browser");
+const {
+  stopPersonaProfile,
+  startPersonaBrowser,
+  listPersonaProfiles,
+} = require("./persona-browser");
+const { computeAccountPersona, indexProfilesById } = require("./persona-overview");
 
 function openFolder(folderPath) {
   return new Promise((resolve, reject) => {
@@ -333,6 +340,84 @@ async function createServer() {
     } catch (error) {
       res.status(400).json({ ok: false, error: error.message });
     }
+  });
+
+  // Explicit "Start" action - attaches (so Persona's real browser is
+  // genuinely up) then immediately releases AutoSocial's own connection,
+  // leaving Persona owning a running, visible browser the operator can
+  // drive directly (e.g. to log in) without the dashboard holding a
+  // Playwright client open on their behalf.
+  app.post("/api/persona/attach", async (req, res) => {
+    try {
+      const profileId = await getPersonaProfileId(req.body?.accountId);
+      if (!profileId) {
+        throw new Error("This account has no linked Persona profile.");
+      }
+      const result = await startPersonaBrowser(profileId, { headless: config.headless });
+      res.json({ ok: true, ...result });
+    } catch (error) {
+      res.status(400).json({ ok: false, error: error.message });
+    }
+  });
+
+  // Real, current Persona profiles - used both for the "Persona Profiles"
+  // list and to populate the link-an-account picker (never requires typing
+  // a profile id by hand).
+  app.get("/api/persona/profiles", async (req, res) => {
+    try {
+      const profiles = await listPersonaProfiles();
+      res.json({ ok: true, profiles });
+    } catch (error) {
+      res.status(200).json({ ok: false, error: error.message, profiles: [] });
+    }
+  });
+
+  // One aggregated read for the dashboard's Persona section: every
+  // AutoSocial account, its Persona mapping (if any) cross-referenced
+  // against Persona's real, single profile-list fetch (not a fetch per
+  // account), and per-platform saved-session status. Degrades honestly
+  // when Persona API is unreachable - the account list and legacy
+  // platform status still return; Persona-derived fields become "unknown"
+  // rather than a fabricated true/false, and personaApiAvailable/
+  // personaApiError tell the UI exactly what happened.
+  app.get("/api/persona/overview", async (req, res) => {
+    const accounts = await getAllAccounts();
+    let profiles = null;
+    let personaApiError = null;
+    try {
+      profiles = await listPersonaProfiles();
+    } catch (error) {
+      personaApiError = error.message;
+    }
+    const profileById = indexProfilesById(profiles);
+    const personaApiAvailable = profiles !== null;
+
+    const accountRows = await Promise.all(
+      accounts.map(async (account) => {
+        const persona = computeAccountPersona(account, profileById, personaApiAvailable);
+
+        const platforms = {};
+        for (const platform of PLATFORMS) {
+          if (account.personaProfileId) {
+            // Same identity backs every platform for this account - avoid
+            // a redundant Persona call per platform when the one profiles
+            // fetch above already answered this.
+            platforms[platform] = { saved: persona.found === null ? null : persona.found };
+          } else {
+            platforms[platform] = { saved: await hasSavedPlatformSession(platform, account.id) };
+          }
+        }
+
+        return { id: account.id, name: account.name, personaProfileId: account.personaProfileId || null, persona, platforms };
+      })
+    );
+
+    res.json({
+      ok: true,
+      personaApiAvailable: profiles !== null,
+      personaApiError,
+      accounts: accountRows,
+    });
   });
 
   // Login endpoints (TikTok)

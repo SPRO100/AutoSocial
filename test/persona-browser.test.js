@@ -7,6 +7,7 @@ const {
   disconnectPersonaBrowser,
   stopPersonaProfile,
   personaProfileExists,
+  listPersonaProfiles,
 } = require("../src/persona-browser");
 
 function withMockFetch(handler, fn) {
@@ -268,6 +269,70 @@ test("stopPersonaProfile is a no-op for an empty profileId (never calls the API 
   assert.equal(called, false);
 });
 
+test("listPersonaProfiles calls the real, exact /api/profiles endpoint and returns the safe id/name/status/tags fields", async () => {
+  let capturedUrl;
+  const realProfiles = [{ id: "6a34ff44d3e1", name: "content-os-api-test", status: "stopped", tags: ["content-os"] }];
+  await withMockFetch(
+    async (url) => {
+      capturedUrl = String(url);
+      return new Response(JSON.stringify(realProfiles), { status: 200, headers: { "Content-Type": "application/json" } });
+    },
+    async () => {
+      const profiles = await listPersonaProfiles();
+      assert.deepEqual(profiles, realProfiles);
+    }
+  );
+  assert.equal(capturedUrl, "http://127.0.0.1:8787/api/profiles");
+});
+
+test("listPersonaProfiles strips every other field from Persona's real profile record - proxy credentials (user/pass), engine, os, locale, _created never leave this function", async () => {
+  // Shaped exactly like Persona's real server.py#_proxy_to_dash() output -
+  // a real profile with a proxy assigned carries its username/password in
+  // plaintext right on the profile object /api/profiles returns.
+  const realProfileWithSecrets = {
+    id: "secret-profile", name: "Has A Proxy", status: "running", tags: ["client-a"],
+    engine: "playwright", os: "linux", locale: "en-US", _created: 123456,
+    proxy: { type: "http", host: "proxy.example.com", port: 8080, user: "realuser", pass: "super-secret-password", country: "US" },
+  };
+  await withMockFetch(
+    async () => new Response(JSON.stringify([realProfileWithSecrets]), { status: 200, headers: { "Content-Type": "application/json" } }),
+    async () => {
+      const profiles = await listPersonaProfiles();
+      assert.equal(profiles.length, 1);
+      const [profile] = profiles;
+      assert.deepEqual(Object.keys(profile).sort(), ["id", "name", "status", "tags"]);
+      assert.equal(profile.id, "secret-profile");
+      assert.equal(profile.name, "Has A Proxy");
+      assert.equal(profile.status, "running");
+      assert.deepEqual(profile.tags, ["client-a"]);
+      // The actual regression check: serialize what this function returns
+      // and confirm the real proxy password is nowhere in it.
+      assert.ok(!JSON.stringify(profile).includes("super-secret-password"), "a proxy password must never survive listPersonaProfiles()");
+      assert.ok(!JSON.stringify(profile).includes("realuser"), "a proxy username must never survive listPersonaProfiles()");
+      assert.ok(!("proxy" in profile), "the proxy object itself must never survive listPersonaProfiles()");
+    }
+  );
+});
+
+test("listPersonaProfiles returns an empty array (never throws/null) for a malformed non-array response", async () => {
+  await withMockFetch(
+    async () => new Response(JSON.stringify({ not: "an array" }), { status: 200, headers: { "Content-Type": "application/json" } }),
+    async () => {
+      const profiles = await listPersonaProfiles();
+      assert.deepEqual(profiles, []);
+    }
+  );
+});
+
+test("listPersonaProfiles throws PersonaApiError when Persona API is unreachable", async () => {
+  await withMockFetch(
+    async () => { throw Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }); },
+    async () => {
+      await assert.rejects(listPersonaProfiles(), PersonaApiError);
+    }
+  );
+});
+
 test("personaProfileExists reports true only for a real match by id, false otherwise", async () => {
   await withMockFetch(
     async () =>
@@ -380,6 +445,56 @@ test("when Playwright fails to connect over CDP after a successful Persona attac
     async () => new Response(JSON.stringify({ port: 1 }), { status: 200, headers: { "Content-Type": "application/json" } }),
     async () => {
       await assert.rejects(mod.attachPersonaProfile("stuck-profile"), /could not connect over CDP/);
+    }
+  );
+});
+
+// ---------------------------------------------------------------------------
+// startPersonaBrowser - the dashboard's "Start" action: attach for real,
+// then immediately release AutoSocial's own connection so Persona keeps
+// the browser running without the dashboard holding a live client open.
+// ---------------------------------------------------------------------------
+
+test("startPersonaBrowser attaches and immediately disconnects - never leaves the checkout held", async () => {
+  const mod = freshPersonaBrowserWithFakePlaywright();
+  await withMockFetch(
+    async () => new Response(JSON.stringify({ port: 42 }), { status: 200, headers: { "Content-Type": "application/json" } }),
+    async () => {
+      const result = await mod.startPersonaBrowser("start-profile", { headless: true });
+      assert.equal(result.profileId, "start-profile");
+      assert.equal(result.port, 42);
+      // The checkout was released - a real upload/login-session for the
+      // same profile must be able to attach right after Start completes.
+      await mod.attachPersonaProfile("start-profile").then((s) => mod.disconnectPersonaBrowser(s));
+    }
+  );
+});
+
+test("startPersonaBrowser passes headless through to the real Persona attach request", async () => {
+  const mod = freshPersonaBrowserWithFakePlaywright();
+  let capturedBody;
+  await withMockFetch(
+    async (_url, init) => {
+      capturedBody = JSON.parse(init.body);
+      return new Response(JSON.stringify({ port: 1 }), { status: 200, headers: { "Content-Type": "application/json" } });
+    },
+    async () => {
+      await mod.startPersonaBrowser("headless-start-profile", { headless: false });
+    }
+  );
+  assert.equal(capturedBody.headless, false);
+});
+
+test("startPersonaBrowser propagates a real attach failure (e.g. profile not found) without leaving a stale checkout", async () => {
+  const mod = freshPersonaBrowserWithFakePlaywright();
+  await withMockFetch(
+    async () => new Response(JSON.stringify({ detail: "profile not found" }), { status: 404, headers: { "Content-Type": "application/json" } }),
+    async () => {
+      await assert.rejects(mod.startPersonaBrowser("missing-profile"), (error) => {
+        assert.ok(error instanceof mod.PersonaApiError);
+        assert.equal(error.status, 404);
+        return true;
+      });
     }
   );
 });

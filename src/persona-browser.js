@@ -240,6 +240,22 @@ async function disconnectPersonaBrowser(session) {
 }
 
 /**
+ * Dashboard-facing "Start" action - attaches the profile (so Persona's
+ * real browser is genuinely up, exactly as if an upload/login-session had
+ * started one) then immediately disconnects AutoSocial's own Playwright
+ * client, releasing the checkout so a real upload/login-session can still
+ * use the profile afterward. Persona keeps the browser running - this
+ * never holds a live connection open on the dashboard's behalf. Composed
+ * entirely from the same attach/disconnect primitives every other caller
+ * uses, never a second attach implementation.
+ */
+async function startPersonaBrowser(profileId, { headless = true } = {}) {
+  const session = await attachPersonaProfile(profileId, { headless });
+  await disconnectPersonaBrowser(session);
+  return { profileId, port: session.info.port };
+}
+
+/**
  * Explicit, intentional shutdown of a Persona profile's browser process.
  * Only call this when the caller genuinely means to stop the profile
  * (e.g. an operator-triggered "stop" action) - never as part of routine
@@ -257,6 +273,45 @@ async function stopPersonaProfile(profileId) {
 }
 
 /**
+ * Strips a real Persona profile record down to the fields that are ever
+ * safe to leave this module - id/name/status/tags. Persona's real record
+ * can carry a `proxy: {..., user, pass, ...}` block (confirmed against
+ * persona-studio's server.py - _proxy_to_dash() puts the real proxy
+ * password in plaintext right on the profile object Persona's own
+ * /api/profiles returns) plus other engine-internal fields no caller here
+ * has ever needed. Every real caller of listPersonaProfiles() (dashboard
+ * routes, personaProfileExists) only ever needs these four - projecting
+ * here, once, at the single point Persona's raw data enters this
+ * process, means no future caller can accidentally forward a credential
+ * just by trusting "the list" was already safe.
+ */
+function toSafeProfileSummary(profile) {
+  return {
+    id: profile.id,
+    name: profile.name ?? null,
+    status: profile.status ?? "unknown",
+    tags: Array.isArray(profile.tags) ? profile.tags : [],
+  };
+}
+
+/**
+ * Real, current list of every Persona profile - id/name/status/tags only
+ * (see toSafeProfileSummary; Persona's real record can carry plaintext
+ * proxy credentials, which never leave this function). Includes each
+ * profile's real running/stopped status, computed by Persona. The one
+ * real fetch every other read in this module is built from - never a
+ * second, independently-maintained copy. Throws PersonaApiError if
+ * Persona API cannot be reached; callers decide how to degrade (see
+ * dashboard-server.js's /api/persona/overview and account-manager.js's
+ * hasSavedPlatformSession, which each pick their own fail-open/honest-
+ * unknown policy for their own use case).
+ */
+async function listPersonaProfiles() {
+  const profiles = await personaRequest("/api/profiles");
+  return Array.isArray(profiles) ? profiles.map(toSafeProfileSummary) : [];
+}
+
+/**
  * Read-only existence check against Persona's real profile list - used as
  * the source of truth for "does this account have a real Persona
  * session/identity", instead of AutoSocial's own (irrelevant, for a
@@ -266,14 +321,16 @@ async function stopPersonaProfile(profileId) {
  */
 async function personaProfileExists(profileId) {
   if (!profileId) return false;
-  const profiles = await personaRequest("/api/profiles");
-  return Array.isArray(profiles) && profiles.some((p) => p.id === profileId);
+  const profiles = await listPersonaProfiles();
+  return profiles.some((p) => p.id === profileId);
 }
 
 module.exports = {
   PersonaApiError,
   attachPersonaProfile,
   disconnectPersonaBrowser,
+  startPersonaBrowser,
   stopPersonaProfile,
+  listPersonaProfiles,
   personaProfileExists,
 };
