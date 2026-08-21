@@ -707,3 +707,41 @@ test("a client bypassing the UI to send an update key for an account with NO lin
   assert.equal(calls.attachPersonaProfile.length, 0);
   assert.equal(calls.importPersonaCookies.length, 0);
 });
+
+// --- Session status persistence (milestone 2: Dashboard account status) --
+// A NEW import's and an Update Session's own verify step must persist the
+// same safe sessionStatus/sessionCheckedAt fields session-check.js's manual
+// "Check session" writes, so the Dashboard reflects the latest
+// verification regardless of which flow produced it.
+
+test("a brand-new account import persists sessionStatus='ready' onto the account after a successful verify", async () => {
+  const { pipeline, accountManager } = await freshPipeline({ sessionUrl: ACTIVE_URL });
+  const report = await pipeline.importBatch([tiktokRecord("session-status-new-account")]);
+  const [result] = report.results;
+  assert.equal(result.status, "READY");
+
+  const account = await accountManager.getAccountById(result.accountId);
+  assert.equal(account.sessionStatus, "ready");
+  assert.ok(account.sessionCheckedAt);
+});
+
+test("a brand-new account import persists sessionStatus='needs_login' after a failed verify", async () => {
+  const { pipeline, accountManager } = await freshPipeline({ sessionUrl: LOGIN_URL });
+  const report = await pipeline.importBatch([tiktokRecord("session-status-needs-login")]);
+  const [result] = report.results;
+  assert.equal(result.status, "NEEDS_LOGIN");
+
+  const account = await accountManager.getAccountById(result.accountId);
+  assert.equal(account.sessionStatus, "needs_login");
+});
+
+test("Update Session persists the refreshed sessionStatus onto the account after its own verify", async () => {
+  const { pipeline, accountManager, registerFakeProfile } = await freshPipeline({ sessionUrl: ACTIVE_URL });
+  const { account } = await seedExistingAccount(accountManager, registerFakeProfile, { username: "session-status-update" });
+
+  await pipeline.importBatch([tiktokRecord("session-status-update")], { updateSessionKeys: ["tiktok:session-status-update"] });
+
+  const reloaded = await accountManager.getAccountById(account.id);
+  assert.equal(reloaded.sessionStatus, "ready");
+  assert.ok(reloaded.sessionCheckedAt);
+});

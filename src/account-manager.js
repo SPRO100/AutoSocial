@@ -41,6 +41,31 @@ function normalizeSourceField(value) {
   return trimmed ? trimmed : null;
 }
 
+const SESSION_STATUS_VALUES = new Set(["ready", "needs_login", "unknown", "error"]);
+const PUBLISH_STATUS_VALUES = new Set(["published", "failed", "unconfirmed"]);
+
+function normalizeEnum(value, allowed) {
+  return typeof value === "string" && allowed.has(value) ? value : null;
+}
+
+// Free text that ends up here must already be a safe, human-readable
+// message (e.g. verifyTikTokSession's own `reason`, or a caught
+// Error.message already written to be safe elsewhere in this codebase -
+// see persona-browser.js/pipeline.js's safeMessage()). Never a raw cookie/
+// password/token - callers are responsible for that before calling in.
+function normalizeSafeText(value, maxLen = 300) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  return trimmed.slice(0, maxLen);
+}
+
+function normalizeIsoTimestamp(value) {
+  if (typeof value !== "string") return null;
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+}
+
 function normalizeAccount(item) {
   const account = { id: item.id, name: item.name };
   const personaProfileId = normalizePersonaProfileId(item.personaProfileId);
@@ -53,6 +78,26 @@ function normalizeAccount(item) {
   const importUsername = normalizeSourceField(item.importUsername);
   if (importPlatform) account.importPlatform = importPlatform;
   if (importUsername) account.importUsername = importUsername;
+
+  // Safe, non-secret operational status - last known verified social
+  // session health and last publish outcome. Set by session-check.js
+  // (manual "Check session", and reused by the import/Update Session
+  // pipeline and the publish precondition check) and tiktok-publish.js.
+  // Never a cookie/password/token - see normalizeSafeText above.
+  const sessionStatus = normalizeEnum(item.sessionStatus, SESSION_STATUS_VALUES);
+  if (sessionStatus) account.sessionStatus = sessionStatus;
+  const sessionCheckedAt = normalizeIsoTimestamp(item.sessionCheckedAt);
+  if (sessionCheckedAt) account.sessionCheckedAt = sessionCheckedAt;
+  const sessionReason = normalizeSafeText(item.sessionReason);
+  if (sessionReason) account.sessionReason = sessionReason;
+
+  const lastPublishStatus = normalizeEnum(item.lastPublishStatus, PUBLISH_STATUS_VALUES);
+  if (lastPublishStatus) account.lastPublishStatus = lastPublishStatus;
+  const lastPublishAt = normalizeIsoTimestamp(item.lastPublishAt);
+  if (lastPublishAt) account.lastPublishAt = lastPublishAt;
+  const lastPublishError = normalizeSafeText(item.lastPublishError);
+  if (lastPublishError) account.lastPublishError = lastPublishError;
+
   return account;
 }
 
@@ -316,6 +361,49 @@ async function clearPersonaProfileId(accountId) {
   return clone(target);
 }
 
+// --- Session / publish status -----------------------------------------
+//
+// Safe, non-secret operational history: the last verified social-session
+// health and the last publish attempt's outcome. Never a cookie/password/
+// token - see normalizeSafeText's contract above; callers must already
+// have sanitized any free text before calling these.
+
+async function setSessionStatus(accountId, { status, reason, checkedAt } = {}) {
+  await ensureLoaded();
+  const target = state.accounts.find((item) => item.id === accountId);
+  if (!target) {
+    throw new Error("Account not found.");
+  }
+  if (!SESSION_STATUS_VALUES.has(status)) {
+    throw new Error(`Invalid session status: ${status}`);
+  }
+  target.sessionStatus = status;
+  target.sessionCheckedAt = normalizeIsoTimestamp(checkedAt) || new Date().toISOString();
+  const safeReason = normalizeSafeText(reason);
+  if (safeReason) target.sessionReason = safeReason;
+  else delete target.sessionReason;
+  await saveState();
+  return clone(target);
+}
+
+async function setPublishStatus(accountId, { status, reason, at } = {}) {
+  await ensureLoaded();
+  const target = state.accounts.find((item) => item.id === accountId);
+  if (!target) {
+    throw new Error("Account not found.");
+  }
+  if (!PUBLISH_STATUS_VALUES.has(status)) {
+    throw new Error(`Invalid publish status: ${status}`);
+  }
+  target.lastPublishStatus = status;
+  target.lastPublishAt = normalizeIsoTimestamp(at) || new Date().toISOString();
+  const safeReason = normalizeSafeText(reason);
+  if (safeReason) target.lastPublishError = safeReason;
+  else delete target.lastPublishError;
+  await saveState();
+  return clone(target);
+}
+
 async function getPlatformProfileDir(platform, accountId) {
   const acctId = accountId || (await getActiveAccount()).id;
   if (acctId === DEFAULT_ACCOUNT.id && LEGACY_PROFILE_DIRS[platform]) {
@@ -390,5 +478,7 @@ module.exports = {
   setPersonaProfileId,
   getPersonaProfileId,
   clearPersonaProfileId,
+  setSessionStatus,
+  setPublishStatus,
   PLATFORMS,
 };

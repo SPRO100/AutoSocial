@@ -94,6 +94,19 @@ function safeMessage(error) {
   return error && error.message ? error.message : String(error);
 }
 
+// Persists the verify step's outcome onto the account record - the same
+// safe, non-secret session-status history session-check.js's manual "Check
+// session" writes, so Dashboard status reflects the LATEST verification
+// regardless of which flow (new import, Update Session, or a manual check)
+// produced it. Best-effort: a failure to persist status must never fail
+// the import/update itself, which has already completed by this point.
+async function persistSessionStatus(accountId, pipelineStatus, reason) {
+  const map = { READY: "ready", NEEDS_LOGIN: "needs_login", FAILED: "error" };
+  const status = map[pipelineStatus];
+  if (!status || !accountId) return;
+  await accountManager.setSessionStatus(accountId, { status, reason }).catch(() => {});
+}
+
 async function rollback({ accountId, profileId }) {
   if (profileId) {
     await persona.deletePersonaProfile(profileId).catch(() => {});
@@ -216,6 +229,7 @@ async function updateExistingAccountSession(existingAccount, record) {
       }
       await persona.stopPersonaProfile(profileId).catch(() => {});
     }
+    await persistSessionStatus(accountId, status, reason);
   }
 
   return {
@@ -398,6 +412,7 @@ async function processRecord(record, updateSessionKeys) {
       }
       await persona.stopPersonaProfile(profileId).catch(() => {});
     }
+    await persistSessionStatus(accountId, status, reason);
   }
 
   return {

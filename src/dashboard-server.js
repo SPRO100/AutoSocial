@@ -50,6 +50,8 @@ const { detectFormat } = require("./importers/detector");
 const { buildPreview, importBatch } = require("./importers/pipeline");
 const uploadStore = require("./importers/upload-store");
 const accountDeletion = require("./account-deletion");
+const sessionCheck = require("./session-check");
+const tiktokPublish = require("./tiktok-publish");
 
 // Upload content is a plain-text credentials file read client-side (see
 // web/app.js's use of FileReader) and posted as JSON, not multipart - this
@@ -65,6 +67,11 @@ const MAX_IMPORT_FILE_BYTES = 2 * 1024 * 1024;
 // rejected by body-parser's generic "request entity too large" before ever
 // reaching the route's own, friendlier size check below.
 const JSON_BODY_LIMIT_BYTES = MAX_IMPORT_FILE_BYTES + 64 * 1024;
+// One manually-uploaded test video for milestone 2's single-video publish
+// flow - generous enough for a real short-form clip, bounded so an
+// oversized upload can't exhaust memory. Applied via express.raw() only on
+// the one publish route below, never the shared JSON body parser.
+const MAX_PUBLISH_VIDEO_BYTES = 200 * 1024 * 1024;
 
 function openFolder(folderPath) {
   return new Promise((resolve, reject) => {
@@ -392,6 +399,50 @@ async function createServer() {
     }
   });
 
+  // Manual "Check session" (see src/session-check.js) - reuses the exact
+  // same verifier the import/Update Session pipeline uses, and restores
+  // whatever running/stopped state the profile was already in.
+  app.post("/api/accounts/check-session", async (req, res) => {
+    try {
+      const accountId = req.body?.accountId;
+      if (!accountId) {
+        return res.status(400).json({ ok: false, error: "Missing accountId." });
+      }
+      const result = await sessionCheck.checkSession(accountId);
+      if (!result.ok) {
+        return res.status(400).json(result);
+      }
+      res.json(result);
+    } catch (error) {
+      res.status(400).json({ ok: false, error: error.message });
+    }
+  });
+
+  // First real single-video TikTok publish (see src/tiktok-publish.js).
+  // Raw video bytes as the request body (see the express.raw() middleware
+  // registered for this exact path below) - accountId/filename/caption via
+  // query string, since a binary body can't also carry JSON fields.
+  app.post("/api/publish/tiktok", express.raw({ type: "*/*", limit: MAX_PUBLISH_VIDEO_BYTES }), async (req, res) => {
+    try {
+      const accountId = req.query?.accountId;
+      if (!accountId || typeof accountId !== "string") {
+        return res.status(400).json({ ok: false, error: "Missing accountId." });
+      }
+      const filename = typeof req.query?.filename === "string" ? req.query.filename : "";
+      const caption = typeof req.query?.caption === "string" ? req.query.caption : "";
+      if (!Buffer.isBuffer(req.body) || !req.body.length) {
+        return res.status(400).json({ ok: false, error: "No video file was provided." });
+      }
+      const result = await tiktokPublish.publish(accountId, { videoBuffer: req.body, filename, caption });
+      if (!result.ok) {
+        return res.status(400).json(result);
+      }
+      res.json(result);
+    } catch (error) {
+      res.status(400).json({ ok: false, error: error.message });
+    }
+  });
+
   // Explicit "Start" action - attaches (so Persona's real browser is
   // genuinely up) then immediately releases AutoSocial's own connection,
   // leaving Persona owning a running, visible browser the operator can
@@ -458,7 +509,22 @@ async function createServer() {
           }
         }
 
-        return { id: account.id, name: account.name, personaProfileId: account.personaProfileId || null, persona, platforms };
+        return {
+          id: account.id,
+          name: account.name,
+          platform: account.importPlatform || null,
+          personaProfileId: account.personaProfileId || null,
+          persona,
+          platforms,
+          // Safe, non-secret operational history - see account-manager.js's
+          // normalizeAccount. Never a cookie/password/token value.
+          sessionStatus: account.sessionStatus || "unknown",
+          sessionCheckedAt: account.sessionCheckedAt || null,
+          sessionReason: account.sessionReason || null,
+          lastPublishStatus: account.lastPublishStatus || null,
+          lastPublishAt: account.lastPublishAt || null,
+          lastPublishError: account.lastPublishError || null,
+        };
       })
     );
 
