@@ -34,7 +34,11 @@ const {
   getActiveAccount,
   getAllAccounts,
   ensureAccountDirs,
+  setPersonaProfileId,
+  clearPersonaProfileId,
+  getPersonaProfileId,
 } = require("./account-manager");
+const { stopPersonaProfile } = require("./persona-browser");
 
 function openFolder(folderPath) {
   return new Promise((resolve, reject) => {
@@ -283,6 +287,49 @@ async function createServer() {
       const account = await selectAccount(req.body?.accountId);
       const state = await getState();
       res.json({ ok: true, account, state });
+    } catch (error) {
+      res.status(400).json({ ok: false, error: error.message });
+    }
+  });
+
+  // Persona Studio profile mapping. Setting this reroutes the account's
+  // browser identity/session to Persona (see src/browser-session.js);
+  // clearing it restores the legacy persistent-profile behavior.
+  app.post("/api/accounts/persona", async (req, res) => {
+    try {
+      const account = await setPersonaProfileId(
+        req.body?.accountId,
+        req.body?.personaProfileId
+      );
+      const state = await getState();
+      res.json({ ok: true, account, state });
+    } catch (error) {
+      res.status(400).json({ ok: false, error: error.message });
+    }
+  });
+
+  app.post("/api/accounts/persona/clear", async (req, res) => {
+    try {
+      const account = await clearPersonaProfileId(req.body?.accountId);
+      const state = await getState();
+      res.json({ ok: true, account, state });
+    } catch (error) {
+      res.status(400).json({ ok: false, error: error.message });
+    }
+  });
+
+  // Explicit, intentional shutdown of a linked account's Persona browser
+  // process (see persona-browser.js#stopPersonaProfile) - the operator's
+  // recovery path if a profile is stuck attached (e.g. after a CDP connect
+  // failure) or they simply want to close it. Never called automatically.
+  app.post("/api/accounts/persona/stop", async (req, res) => {
+    try {
+      const profileId = await getPersonaProfileId(req.body?.accountId);
+      if (!profileId) {
+        throw new Error("This account has no linked Persona profile.");
+      }
+      await stopPersonaProfile(profileId);
+      res.json({ ok: true, profileId });
     } catch (error) {
       res.status(400).json({ ok: false, error: error.message });
     }

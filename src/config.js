@@ -77,6 +77,12 @@ const config = {
     process.env.INSTAGRAM_UPLOAD_URL || "https://www.instagram.com/create/style/",
   youtubeUploadPageUrl:
     process.env.YOUTUBE_UPLOAD_URL || "https://studio.youtube.com",
+  // Persona Studio integration (see src/persona-browser.js) - when an
+  // account is mapped to a Persona profile, Persona owns the browser
+  // identity/session instead of AutoSocial's own persistent-profile
+  // directories.
+  personaApiUrl: process.env.PERSONA_API_URL || "http://127.0.0.1:8787",
+  personaAttachTimeoutMs: Number(process.env.PERSONA_ATTACH_TIMEOUT_MS || 30000),
   dashboardHost: process.env.DASHBOARD_HOST || "127.0.0.1",
   dashboardPort: Number(process.env.DASHBOARD_PORT || 3000),
   dashboardAllowRemote: getBoolean(process.env.DASHBOARD_ALLOW_REMOTE, false),

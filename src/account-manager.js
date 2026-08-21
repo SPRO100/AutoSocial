@@ -2,7 +2,12 @@ const fs = require("fs/promises");
 const path = require("path");
 const { config } = require("./config");
 
-const STATE_FILE = path.resolve(config.projectRoot, "accounts-state.json");
+// Overridable for test isolation (same convention as every other path in
+// config.js) - never set in normal operation, so production behavior is
+// unchanged.
+const STATE_FILE = process.env.ACCOUNTS_STATE_FILE
+  ? path.resolve(process.env.ACCOUNTS_STATE_FILE)
+  : path.resolve(config.projectRoot, "accounts-state.json");
 const DEFAULT_ACCOUNT = { id: "default", name: "Default" };
 const LEGACY_PROFILE_DIRS = {
   tiktok: config.profileDir,
@@ -20,11 +25,28 @@ function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+function normalizePersonaProfileId(value) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
+// Preserves every known optional field on an account across a load/save
+// round-trip. Extend this (not a bare {id, name} literal) when adding a new
+// optional account field, or it will silently vanish the next time
+// accounts-state.json is read.
+function normalizeAccount(item) {
+  const account = { id: item.id, name: item.name };
+  const personaProfileId = normalizePersonaProfileId(item.personaProfileId);
+  if (personaProfileId) account.personaProfileId = personaProfileId;
+  return account;
+}
+
 function normalizeState(raw) {
   const accounts = Array.isArray(raw?.accounts)
     ? raw.accounts
       .filter((item) => item && typeof item.id === "string" && typeof item.name === "string")
-      .map((item) => ({ id: item.id, name: item.name }))
+      .map(normalizeAccount)
     : [];
   if (!accounts.length) {
     accounts.push({ ...DEFAULT_ACCOUNT });
@@ -157,6 +179,66 @@ async function getAllAccounts() {
   return clone(state.accounts);
 }
 
+async function getAccountById(accountId) {
+  await ensureLoaded();
+  const target = state.accounts.find((item) => item.id === accountId);
+  return target ? clone(target) : null;
+}
+
+// --- Persona profile mapping -----------------------------------------
+//
+// An account may optionally be linked to a Persona Studio browser profile
+// (see src/persona-browser.js, src/browser-session.js). The mapping is
+// just a plain field on the account record - never hardcoded, never
+// assumed; callers must read it per-account.
+
+async function setPersonaProfileId(accountId, profileId) {
+  await ensureLoaded();
+  const target = state.accounts.find((item) => item.id === accountId);
+  if (!target) {
+    throw new Error("Account not found.");
+  }
+  const normalized = normalizePersonaProfileId(profileId);
+  if (!normalized) {
+    throw new Error("Persona profile id is required.");
+  }
+  // One Persona profile must never drive two different AutoSocial accounts
+  // at once - two accounts sharing a mapping would mean two independent
+  // upload/login flows racing to attach and drive the same real browser
+  // tab (see persona-browser.js's per-profile checkout guard, which
+  // protects one process's concurrent calls but can't protect against two
+  // ACCOUNTS being configured to point at the same identity in the first
+  // place).
+  const conflict = state.accounts.find(
+    (item) => item.id !== accountId && item.personaProfileId === normalized
+  );
+  if (conflict) {
+    throw new Error(
+      `Persona profile ${normalized} is already linked to account "${conflict.name}" (${conflict.id}). ` +
+      `Clear that mapping first if you want to move it.`
+    );
+  }
+  target.personaProfileId = normalized;
+  await saveState();
+  return clone(target);
+}
+
+async function getPersonaProfileId(accountId) {
+  const account = await getAccountById(accountId);
+  return account?.personaProfileId || null;
+}
+
+async function clearPersonaProfileId(accountId) {
+  await ensureLoaded();
+  const target = state.accounts.find((item) => item.id === accountId);
+  if (!target) {
+    throw new Error("Account not found.");
+  }
+  delete target.personaProfileId;
+  await saveState();
+  return clone(target);
+}
+
 async function getPlatformProfileDir(platform, accountId) {
   const acctId = accountId || (await getActiveAccount()).id;
   if (acctId === DEFAULT_ACCOUNT.id && LEGACY_PROFILE_DIRS[platform]) {
@@ -171,6 +253,29 @@ async function getPlatformProfileDir(platform, accountId) {
 }
 
 async function hasSavedPlatformSession(platform, accountId) {
+  const account = accountId
+    ? await getAccountById(accountId)
+    : await getActiveAccount();
+
+  // Persona is the source of truth once an account is linked - AutoSocial's
+  // own .profiles Cookies DB is irrelevant for these accounts (it was never
+  // written to; Persona owns the real browser data). A transient Persona
+  // API outage fails OPEN (treated as saved) rather than falsely implying
+  // the operator needs to redo the account link - only a confirmed-absent
+  // profile (Persona reachable, id genuinely not found) reports false.
+  if (account?.personaProfileId) {
+    // Lazy require avoids pulling in playwright (persona-browser.js's own
+    // top-level dependency) for every account-manager.js consumer that
+    // never touches a Persona-linked account.
+    const { personaProfileExists } = require("./persona-browser");
+    try {
+      return await personaProfileExists(account.personaProfileId);
+    } catch {
+      // Persona API unreachable - fail OPEN (see comment above).
+      return true;
+    }
+  }
+
   const profileDir = await getPlatformProfileDir(platform, accountId);
   const cookieCandidates = [
     path.resolve(profileDir, "Default", "Cookies"),
@@ -198,9 +303,13 @@ module.exports = {
   selectAccount,
   getActiveAccount,
   getAllAccounts,
+  getAccountById,
   getAccountQueueDirs,
   ensureAccountDirs,
   getPlatformProfileDir,
   hasSavedPlatformSession,
+  setPersonaProfileId,
+  getPersonaProfileId,
+  clearPersonaProfileId,
   PLATFORMS,
 };

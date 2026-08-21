@@ -1,27 +1,17 @@
 const path = require("path");
-const fs = require("fs/promises");
-const { chromium } = require("playwright");
 const { config } = require("./config");
 const uiLabels = require("./platform-ui-labels");
 const {
   getActiveAccount,
-  getPlatformProfileDir,
   hasSavedPlatformSession,
 } = require("./account-manager");
+const { acquireBrowserSession } = require("./browser-session");
 
-let loginSessionContext = null;
+let loginSession = null;
 let loginSessionAccountId = null;
 
-async function openPersistentContext(accountId) {
-  const profileDir = await getPlatformProfileDir("youtube", accountId);
-  await fs.mkdir(profileDir, { recursive: true });
-  return chromium.launchPersistentContext(profileDir, {
-    headless: config.headless,
-    viewport: { width: 1400, height: 1000 },
-    locale: config.browserLocale,
-    timezoneId: config.timezone,
-    args: ["--disable-blink-features=AutomationControlled"],
-  });
+async function openBrowserSession(accountId) {
+  return acquireBrowserSession("youtube", { accountId });
 }
 
 async function gotoUploadPage(page) {
@@ -360,54 +350,58 @@ async function waitForPublishConfirmation(page) {
 
 async function startLoginSession() {
   const activeAccount = await getActiveAccount();
-  if (loginSessionContext && loginSessionAccountId !== activeAccount.id) {
-    const previous = loginSessionContext;
-    loginSessionContext = null;
+  if (loginSession && loginSessionAccountId !== activeAccount.id) {
+    const previous = loginSession;
+    loginSession = null;
     loginSessionAccountId = null;
-    await previous.close().catch(() => { });
+    await previous.disconnect().catch(() => { });
   }
 
-  if (loginSessionContext) {
+  if (loginSession) {
     return { ok: true, alreadyOpen: true };
   }
-  const context = await openPersistentContext(activeAccount.id);
-  const page = context.pages()[0] || (await context.newPage());
-  loginSessionContext = context;
+  const session = await openBrowserSession(activeAccount.id);
+  loginSession = session;
   loginSessionAccountId = activeAccount.id;
-  context.on("close", () => {
-    if (loginSessionContext === context) {
-      loginSessionContext = null;
+  const clearIfCurrent = () => {
+    if (loginSession === session) {
+      loginSession = null;
       loginSessionAccountId = null;
     }
-  });
-  await gotoUploadPage(page);
-  return { ok: true, alreadyOpen: false, url: page.url() };
+  };
+  if (session.browser) {
+    session.browser.on("disconnected", clearIfCurrent);
+  } else {
+    session.context.on("close", clearIfCurrent);
+  }
+  await gotoUploadPage(session.page);
+  return { ok: true, alreadyOpen: false, url: session.page.url() };
 }
 
 async function getLoginSessionStatus() {
   const activeAccount = await getActiveAccount();
   const saved = await hasSavedPlatformSession("youtube", activeAccount.id);
   return {
-    open: Boolean(loginSessionContext) && loginSessionAccountId === activeAccount.id,
+    open: Boolean(loginSession) && loginSessionAccountId === activeAccount.id,
     saved,
   };
 }
 
 async function closeLoginSession() {
-  if (!loginSessionContext) {
+  if (!loginSession) {
     return { ok: true, alreadyClosed: true };
   }
-  const context = loginSessionContext;
-  loginSessionContext = null;
+  const session = loginSession;
+  loginSession = null;
   loginSessionAccountId = null;
-  await context.close().catch(() => { });
+  await session.disconnect().catch(() => { });
   return { ok: true, alreadyClosed: false };
 }
 
 async function uploadVideo({ videoPath, caption, accountId }) {
   const absoluteVideoPath = path.resolve(videoPath);
-  const context = await openPersistentContext(accountId);
-  const page = context.pages()[0] || (await context.newPage());
+  const session = await openBrowserSession(accountId);
+  const { page } = session;
   let closeHoldMs = 0;
   try {
     await gotoUploadPage(page);
@@ -452,7 +446,7 @@ async function uploadVideo({ videoPath, caption, accountId }) {
     };
   } finally {
     await page.waitForTimeout(closeHoldMs).catch(() => { });
-    await context.close();
+    await session.disconnect();
   }
 }
 
