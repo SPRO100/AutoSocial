@@ -57,12 +57,32 @@ async function buildPreview(records) {
       duplicateInBatch = seen.has(key);
       seen.add(key);
     }
-    let existingAccount = false;
+    let alreadyImported = false;
+    let existingAccountId = null;
+    let existingPersonaProfileId = null;
     if (record.platform && record.username) {
       const match = await accountManager.findAccountByImportSource(record.platform, record.username);
-      existingAccount = Boolean(match);
+      if (match) {
+        alreadyImported = true;
+        existingAccountId = match.id;
+        existingPersonaProfileId = match.personaProfileId || null;
+      }
     }
-    preview.push({ ...safe, duplicateInBatch, alreadyImported: existingAccount });
+    // Fail-closed, by construction: "Update session" is only ever offered
+    // when there is an unambiguous existing account (findAccountByImportSource
+    // returns at most one match) AND it already has a linked Persona
+    // profile. No mapping, or an account with no linked profile, means no
+    // update option - never guessed, never auto-created.
+    const canUpdateSession = alreadyImported && Boolean(existingPersonaProfileId);
+    preview.push({
+      ...safe,
+      key,
+      duplicateInBatch,
+      alreadyImported,
+      existingAccountId,
+      existingPersonaProfileId,
+      canUpdateSession,
+    });
   }
   return preview;
 }
@@ -83,12 +103,144 @@ async function rollback({ accountId, profileId }) {
   }
 }
 
-async function processRecord(record) {
+// Update Session: an existing account's already-linked Persona profile
+// gets a fresh cookie import from a re-uploaded supplier file, instead of
+// creating anything new. Never calls addAccount() or createPersonaProfile()
+// - the account and profile must already exist and already be linked
+// (callers only reach this after that exact check - see processRecord
+// below and buildPreview's canUpdateSession). A failure here leaves the
+// existing account/profile exactly as they were; there is nothing to roll
+// back because nothing new was created.
+async function updateExistingAccountSession(existingAccount, record) {
+  const base = { platform: record.platform, username: record.username };
+  const accountId = existingAccount.id;
+  const profileId = existingAccount.personaProfileId;
+
+  // Fail-closed - buildPreview already gates this, but processRecord's own
+  // caller re-checks defensively rather than trusting a client-supplied key
+  // blindly matched an offer that was actually valid.
+  if (!profileId) {
+    return {
+      ...base,
+      accountId,
+      autosocial: "Existing",
+      persona: "Missing",
+      cookies: "Skipped",
+      session: "Skipped",
+      status: "FAILED",
+      reason: "this account has no linked Persona profile - cannot update its session",
+    };
+  }
+
+  // Cookie import requires the profile to not be running.
+  await persona.stopPersonaProfile(profileId).catch(() => {});
+
+  // clear:true (a real replace, not a merge - Persona's own /cookies
+  // endpoint adds/overwrites by (name, domain, path) but never removes a
+  // cookie it wasn't given, confirmed empirically before writing this) is
+  // only safe on a profile this pipeline itself knows to be single-purpose
+  // - i.e. one it created via processRecord's own createPersonaProfile
+  // call below, tagged "autosocial-import". An account can be relinked to
+  // an arbitrary, possibly shared/multi-purpose Persona profile through
+  // the existing manual link UI (POST /api/accounts/persona), which has no
+  // such guarantee - wiping THAT profile's whole cookie jar could destroy
+  // unrelated domains/sessions it holds. Checked here, against Persona's
+  // real current tags for this exact profile id, rather than trusted from
+  // the account record - independent reviewer finding, fixed before commit.
+  let allowFullReplace = false;
+  try {
+    const profiles = await persona.listPersonaProfiles();
+    const liveProfile = profiles.find((p) => p.id === profileId);
+    allowFullReplace = Boolean(liveProfile?.tags?.includes("autosocial-import"));
+  } catch {
+    // Persona API hiccup reading tags - fail closed to the non-destructive
+    // merge path below rather than risk an unverified full wipe.
+  }
+
+  let cookiesStatus = "Skipped (none provided)";
+  if (record.cookies) {
+    const payload = toPersonaCookiePayload(record.cookies, record.platform);
+    if (!payload) {
+      return {
+        ...base,
+        accountId,
+        personaProfileId: profileId,
+        autosocial: "Existing",
+        persona: "Existing",
+        cookies: "Failed",
+        session: "Skipped",
+        status: "FAILED",
+        reason: "the supplied cookie data could not be parsed into a usable format",
+      };
+    }
+    try {
+      await persona.importPersonaCookies(profileId, { ...payload, clear: allowFullReplace });
+      cookiesStatus = allowFullReplace
+        ? "Imported"
+        : "Imported (merged - profile was not created by this pipeline, so its other cookies were left alone)";
+    } catch (error) {
+      return {
+        ...base,
+        accountId,
+        personaProfileId: profileId,
+        autosocial: "Existing",
+        persona: "Existing",
+        cookies: "Failed",
+        session: "Skipped",
+        status: "FAILED",
+        reason: safeMessage(error),
+      };
+    }
+  }
+
+  const verify = VERIFIERS[record.platform];
+  let sessionLabel = "Skipped (verification not implemented for this platform)";
+  let status = "FAILED";
+  let reason = verify ? null : `no session verifier is implemented for platform "${record.platform}"`;
+
+  if (verify) {
+    let session = null;
+    try {
+      session = await persona.attachPersonaProfile(profileId, { headless: true });
+      const result = await verify(session.page);
+      sessionLabel = result.active ? "Active" : "Invalid";
+      status = result.active ? "READY" : "NEEDS_LOGIN";
+      reason = result.active ? null : result.reason;
+    } catch (error) {
+      sessionLabel = "Unknown";
+      status = "FAILED";
+      reason = safeMessage(error);
+    } finally {
+      if (session) {
+        await persona.disconnectPersonaBrowser(session).catch(() => {});
+      }
+      await persona.stopPersonaProfile(profileId).catch(() => {});
+    }
+  }
+
+  return {
+    ...base,
+    accountId,
+    personaProfileId: profileId,
+    autosocial: "Existing",
+    persona: "Existing",
+    cookies: cookiesStatus,
+    session: sessionLabel,
+    status,
+    reason,
+  };
+}
+
+async function processRecord(record, updateSessionKeys) {
   const base = { platform: record.platform, username: record.username };
 
   if (record.platform && record.username) {
     const existing = await accountManager.findAccountByImportSource(record.platform, record.username);
     if (existing) {
+      const key = duplicateKey(record);
+      if (updateSessionKeys && key && updateSessionKeys.has(key) && existing.personaProfileId) {
+        return updateExistingAccountSession(existing, record);
+      }
       return {
         ...base,
         accountId: existing.id,
@@ -276,16 +428,19 @@ function duplicateSkipResult(record, reason) {
 
 // Wraps processRecord with the process-wide claim described above - the
 // single place both the intra-batch and cross-request duplicate races are
-// closed.
-async function claimAndProcess(record) {
+// closed. This also covers Update Session: two concurrent requests for the
+// same (platform, username) - whether both are new imports, both are
+// update-session calls, or one of each - can never both proceed against
+// the same Persona profile at once.
+async function claimAndProcess(record, updateSessionKeys) {
   const key = duplicateKey(record);
-  if (!key) return processRecord(record);
+  if (!key) return processRecord(record, updateSessionKeys);
   if (activeImportKeys.has(key)) {
-    return duplicateSkipResult(record, "this platform/username is already being imported by another in-flight request");
+    return duplicateSkipResult(record, "this platform/username is already being imported or updated by another in-flight request");
   }
   activeImportKeys.add(key);
   try {
-    return await processRecord(record);
+    return await processRecord(record, updateSessionKeys);
   } finally {
     activeImportKeys.delete(key);
   }
@@ -295,8 +450,15 @@ async function claimAndProcess(record) {
 // (clamped to MAX_CONCURRENCY) Persona attach/verify operations (each a
 // real Chromium process) at once, and one record's exception never aborts
 // the batch.
-async function importBatch(records, { concurrency = DEFAULT_CONCURRENCY } = {}) {
+//
+// updateSessionKeys: an explicit, caller-supplied allow-list (duplicateKey
+// strings, e.g. "tiktok:someuser") of which already-imported records the
+// caller wants to run Update Session for. Anything not in this list stays
+// the existing, safe default (SKIPPED_DUPLICATE) - Update Session is never
+// applied automatically to every duplicate in a batch.
+async function importBatch(records, { concurrency = DEFAULT_CONCURRENCY, updateSessionKeys = [] } = {}) {
   const limit = Math.min(MAX_CONCURRENCY, Math.max(1, Number(concurrency) || DEFAULT_CONCURRENCY));
+  const updateSet = new Set(Array.isArray(updateSessionKeys) ? updateSessionKeys : []);
   const results = new Array(records.length);
   let cursor = 0;
 
@@ -307,7 +469,7 @@ async function importBatch(records, { concurrency = DEFAULT_CONCURRENCY } = {}) 
       if (index >= records.length) return;
       const record = records[index];
       try {
-        results[index] = await claimAndProcess(record);
+        results[index] = await claimAndProcess(record, updateSet);
       } catch (error) {
         // processRecord already catches its own known failure points; this
         // is a last-resort net so one unexpected exception can never abort

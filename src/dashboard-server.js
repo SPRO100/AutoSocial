@@ -502,7 +502,14 @@ async function createServer() {
         });
       }
       const concurrency = Number(req.body?.concurrency) || undefined;
-      const report = await importBatch(entry.records, { concurrency });
+      // Explicit, per-record opt-in for Update Session on an already-
+      // imported (platform, username) - see importers/pipeline.js. Never
+      // applied automatically; an empty/missing list means every duplicate
+      // stays the existing safe default (SKIPPED_DUPLICATE).
+      const updateSessionKeys = Array.isArray(req.body?.updateSessionKeys)
+        ? req.body.updateSessionKeys.filter((k) => typeof k === "string")
+        : [];
+      const report = await importBatch(entry.records, { concurrency, updateSessionKeys });
       for (const result of report.results) {
         if (result.accountId) {
           try {

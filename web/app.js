@@ -2146,8 +2146,23 @@ const UI = {
     this.els.importPreviewTableBody.innerHTML = result.preview
       .map((r) => {
         let note = "";
-        if (r.alreadyImported) note = '<span class="status-badge locked">Already imported</span>';
-        else if (r.duplicateInBatch) note = '<span class="status-badge locked">Duplicate in file</span>';
+        if (r.alreadyImported) {
+          const linked = r.existingPersonaProfileId
+            ? `<div class="mono" style="font-size:11px; color:var(--text-muted);">${escapeHtml(r.existingPersonaProfileId)}</div>`
+            : "";
+          if (r.canUpdateSession) {
+            note = `
+              <div>Existing account${linked}</div>
+              <label style="display:flex; align-items:center; gap:6px; margin-top:4px; font-weight:normal;">
+                <input type="checkbox" class="import-update-session-checkbox" data-key="${escapeHtml(r.key || "")}">
+                Update session
+              </label>`;
+          } else {
+            note = `<div>Existing account${linked}</div><div style="font-size:11px; color:var(--text-muted);">No linked Persona profile - cannot update</div>`;
+          }
+        } else if (r.duplicateInBatch) {
+          note = '<span class="status-badge locked">Duplicate in file</span>';
+        }
         return `
         <tr>
           <td>${escapeHtml(r.platform || "-")}</td>
@@ -2163,11 +2178,16 @@ const UI = {
 
   async handleImportConfirm() {
     if (!this.importId) return;
+    // Explicit, per-row opt-in only - an unchecked existing account stays
+    // the safe default (skipped), never updated automatically.
+    const updateSessionKeys = Array.from(
+      this.els.importPreviewTableBody?.querySelectorAll(".import-update-session-checkbox:checked") || []
+    ).map((el) => el.dataset.key).filter(Boolean);
     this.els.importPreviewStep.style.display = "none";
     this.els.importRunningStep.style.display = "";
     try {
       const concurrency = Number(this.els.importConcurrencyInput?.value) || 2;
-      const result = await API.post("/api/import/confirm", { importId: this.importId, concurrency });
+      const result = await API.post("/api/import/confirm", { importId: this.importId, concurrency, updateSessionKeys });
       this.renderImportResults(result.report);
       this.els.importRunningStep.style.display = "none";
       this.els.importResultsStep.style.display = "";

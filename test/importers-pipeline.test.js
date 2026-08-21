@@ -32,14 +32,22 @@ async function freshPipeline({ persona = {}, sessionUrl = ACTIVE_URL } = {}) {
 
   let personaIdCounter = 0;
   const calls = { deletePersonaProfile: [], importPersonaCookies: [], attachPersonaProfile: [], stopPersonaProfile: [] };
+  // Tracks every profile "known to exist" in this fake Persona, with its
+  // real tags - backs the default listPersonaProfiles() below, and lets
+  // tests register a profile Update Session didn't itself create (to
+  // simulate the manual-relink scenario updateExistingAccountSession's
+  // clear:true safety check must fail closed against).
+  const profileRegistry = new Map();
+  function registerFakeProfile(id, { name = id, status = "stopped", tags = [] } = {}) {
+    profileRegistry.set(id, { id, name, status, tags });
+  }
 
   const fakePersona = {
-    createPersonaProfile: async ({ name, tags }) => ({
-      id: `persona-${++personaIdCounter}`,
-      name,
-      status: "stopped",
-      tags: tags || [],
-    }),
+    createPersonaProfile: async ({ name, tags }) => {
+      const profile = { id: `persona-${++personaIdCounter}`, name, status: "stopped", tags: tags || [] };
+      profileRegistry.set(profile.id, profile);
+      return profile;
+    },
     importPersonaCookies: async (profileId, opts) => {
       calls.importPersonaCookies.push({ profileId, opts });
       return { ok: true, imported: 1 };
@@ -55,7 +63,7 @@ async function freshPipeline({ persona = {}, sessionUrl = ACTIVE_URL } = {}) {
     deletePersonaProfile: async (profileId) => {
       calls.deletePersonaProfile.push(profileId);
     },
-    listPersonaProfiles: async () => [],
+    listPersonaProfiles: async () => [...profileRegistry.values()],
     personaProfileExists: async () => true,
     startPersonaBrowser: async () => ({}),
     PersonaApiError: class PersonaApiError extends Error {},
@@ -65,7 +73,7 @@ async function freshPipeline({ persona = {}, sessionUrl = ACTIVE_URL } = {}) {
 
   delete require.cache[require.resolve("../src/importers/pipeline")];
   const pipeline = require("../src/importers/pipeline");
-  return { pipeline, accountManager, fakePersona, calls, dir };
+  return { pipeline, accountManager, fakePersona, calls, dir, registerFakeProfile };
 }
 
 function tiktokRecord(username, overrides = {}) {
@@ -415,4 +423,287 @@ test("the real supplier fixture (header + two accounts) detects, parses to exact
   assert.ok(!serialized.includes("fake-auth-token"), "no auth token may ever reach the preview");
   assert.ok(!serialized.includes("fakeSESSIONVALUE"), "no cookie value may ever reach the preview");
   assert.ok(!serialized.includes("fakeacct_one@example.com"), "the full raw email must never reach the preview, only the masked form");
+});
+
+// --- Update Session -------------------------------------------------------
+// Refreshes an already-imported account's linked Persona profile with a
+// fresh cookie import - never creates a new account or profile. See
+// pipeline.js#updateExistingAccountSession and buildPreview's
+// canUpdateSession/key fields.
+
+// By default the profile is registered exactly like one this pipeline
+// really created for an original import - tagged "autosocial-import",
+// matching processRecord's own createPersonaProfile call. Pass
+// profileTags: [] to simulate a profile Update Session did NOT create
+// itself (e.g. manually relinked via the existing link UI), which the
+// clear:true safety check must fail closed against.
+async function seedExistingAccount(accountManager, registerFakeProfile, {
+  username = "existing-user",
+  platform = "tiktok",
+  profileId = "existing-profile-1",
+  profileTags = ["autosocial-import", "tiktok"],
+} = {}) {
+  const account = await accountManager.addAccount(username, { importPlatform: platform, importUsername: username });
+  await accountManager.setPersonaProfileId(account.id, profileId);
+  registerFakeProfile(profileId, { tags: profileTags });
+  return { account, profileId };
+}
+
+test("buildPreview flags an existing account as canUpdateSession with its real linked Persona profile id and a stable key", async () => {
+  const { pipeline, accountManager, registerFakeProfile } = await freshPipeline();
+  const { account, profileId } = await seedExistingAccount(accountManager, registerFakeProfile, { username: "account-preview-1" });
+
+  const preview = await pipeline.buildPreview([tiktokRecord("account-preview-1")]);
+  assert.equal(preview.length, 1);
+  const [entry] = preview;
+  assert.equal(entry.alreadyImported, true);
+  assert.equal(entry.existingAccountId, account.id);
+  assert.equal(entry.existingPersonaProfileId, profileId);
+  assert.equal(entry.canUpdateSession, true);
+  assert.equal(entry.key, "tiktok:account-preview-1");
+});
+
+test("buildPreview reports canUpdateSession:false (fail-closed) for an existing account with no linked Persona profile", async () => {
+  const { pipeline, accountManager } = await freshPipeline();
+  await accountManager.addAccount("account-no-profile", { importPlatform: "tiktok", importUsername: "account-no-profile" });
+
+  const preview = await pipeline.buildPreview([tiktokRecord("account-no-profile")]);
+  const [entry] = preview;
+  assert.equal(entry.alreadyImported, true);
+  assert.equal(entry.existingPersonaProfileId, null);
+  assert.equal(entry.canUpdateSession, false, "no linked profile means Update Session must never be offered");
+});
+
+test("Update Session refreshes the EXISTING linked profile and never calls addAccount/createPersonaProfile", async () => {
+  let createPersonaProfileCalled = false;
+  const { pipeline, accountManager, registerFakeProfile } = await freshPipeline({
+    persona: {
+      createPersonaProfile: async () => { createPersonaProfileCalled = true; throw new Error("must not be called for Update Session"); },
+    },
+    sessionUrl: ACTIVE_URL,
+  });
+  const { account, profileId } = await seedExistingAccount(accountManager, registerFakeProfile, { username: "account-update-1" });
+  const accountCountBefore = (await accountManager.getAllAccounts()).length;
+
+  const report = await pipeline.importBatch([tiktokRecord("account-update-1")], { updateSessionKeys: ["tiktok:account-update-1"] });
+
+  assert.equal(createPersonaProfileCalled, false);
+  const [result] = report.results;
+  assert.equal(result.accountId, account.id);
+  assert.equal(result.personaProfileId, profileId, "must reuse the exact existing profile id, never a new one");
+  assert.equal(result.autosocial, "Existing");
+  assert.equal(result.persona, "Existing");
+  assert.equal(result.cookies, "Imported");
+  assert.equal(result.status, "READY");
+
+  const accountCountAfter = (await accountManager.getAllAccounts()).length;
+  assert.equal(accountCountAfter, accountCountBefore, "no new account may be created");
+  const reloaded = await accountManager.getAccountById(account.id);
+  assert.equal(reloaded.personaProfileId, profileId, "the account must still point at the same profile, not a new one");
+});
+
+test("Update Session imports cookies with clear:true (real replace, not merge) and stops the profile before importing", async () => {
+  const stopCallsBeforeImport = [];
+  const { pipeline, accountManager, calls, registerFakeProfile } = await freshPipeline({
+    persona: {
+      importPersonaCookies: async (profileId, opts) => {
+        stopCallsBeforeImport.push(calls.stopPersonaProfile.length);
+        calls.importPersonaCookies.push({ profileId, opts });
+        return { ok: true, imported: 1 };
+      },
+    },
+    sessionUrl: ACTIVE_URL,
+  });
+  const { profileId } = await seedExistingAccount(accountManager, registerFakeProfile, { username: "account-update-2" });
+
+  await pipeline.importBatch([tiktokRecord("account-update-2")], { updateSessionKeys: ["tiktok:account-update-2"] });
+
+  assert.ok(stopCallsBeforeImport[0] >= 1, "the profile must be stopped before cookie import is attempted");
+  const [importCall] = calls.importPersonaCookies;
+  assert.equal(importCall.profileId, profileId);
+  assert.equal(importCall.opts.clear, true, "Update Session must fully replace cookies, not merge with a stale session");
+});
+
+test("Update Session reports NEEDS_LOGIN when the refreshed session still isn't authenticated, without touching the existing account/profile", async () => {
+  const { pipeline, accountManager, registerFakeProfile } = await freshPipeline({ sessionUrl: LOGIN_URL });
+  const { account, profileId } = await seedExistingAccount(accountManager, registerFakeProfile, { username: "account-update-3" });
+
+  const report = await pipeline.importBatch([tiktokRecord("account-update-3")], { updateSessionKeys: ["tiktok:account-update-3"] });
+  const [result] = report.results;
+  assert.equal(result.status, "NEEDS_LOGIN");
+  assert.equal(result.session, "Invalid");
+
+  const reloaded = await accountManager.getAccountById(account.id);
+  assert.equal(reloaded.personaProfileId, profileId, "NEEDS_LOGIN must not remove the account/profile link");
+});
+
+test("only the explicitly selected duplicate is updated - a second existing account not in updateSessionKeys stays SKIPPED_DUPLICATE untouched", async () => {
+  const { pipeline, accountManager, calls, registerFakeProfile } = await freshPipeline({ sessionUrl: ACTIVE_URL });
+  const first = await seedExistingAccount(accountManager, registerFakeProfile, { username: "account-selected" });
+  const second = await seedExistingAccount(accountManager, registerFakeProfile, { username: "account-not-selected", profileId: "existing-profile-2" });
+
+  const report = await pipeline.importBatch(
+    [tiktokRecord("account-selected"), tiktokRecord("account-not-selected")],
+    { updateSessionKeys: ["tiktok:account-selected"] }
+  );
+
+  const byUsername = Object.fromEntries(report.results.map((r) => [r.username, r]));
+  assert.equal(byUsername["account-selected"].status, "READY");
+  assert.equal(byUsername["account-selected"].autosocial, "Existing");
+  assert.equal(byUsername["account-not-selected"].status, "SKIPPED_DUPLICATE");
+
+  // The untouched account's profile was never attached/imported at all.
+  assert.ok(!calls.importPersonaCookies.some((c) => c.profileId === second.profileId));
+  assert.ok(!calls.attachPersonaProfile.includes(second.profileId));
+
+  const reloadedFirst = await accountManager.getAccountById(first.account.id);
+  const reloadedSecond = await accountManager.getAccountById(second.account.id);
+  assert.equal(reloadedFirst.personaProfileId, first.profileId);
+  assert.equal(reloadedSecond.personaProfileId, second.profileId);
+});
+
+test("two concurrent Update Session requests for the SAME account never both proceed - one is skipped as in-flight", async () => {
+  const { pipeline, accountManager, calls, registerFakeProfile } = await freshPipeline({
+    persona: {
+      attachPersonaProfile: async (profileId) => {
+        calls.attachPersonaProfile.push(profileId);
+        await new Promise((r) => setTimeout(r, 20));
+        return { profileId, page: makeFakePage(ACTIVE_URL), browser: {}, context: {}, info: { port: 1 } };
+      },
+    },
+  });
+  await seedExistingAccount(accountManager, registerFakeProfile, { username: "account-racey" });
+
+  const [reportA, reportB] = await Promise.all([
+    pipeline.importBatch([tiktokRecord("account-racey")], { updateSessionKeys: ["tiktok:account-racey"] }),
+    pipeline.importBatch([tiktokRecord("account-racey")], { updateSessionKeys: ["tiktok:account-racey"] }),
+  ]);
+
+  const statuses = [reportA.results[0].status, reportB.results[0].status].sort();
+  assert.deepEqual(statuses, ["READY", "SKIPPED_DUPLICATE"], "exactly one concurrent update may proceed - the other must be skipped as in-flight, never run against the same profile at the same time");
+  assert.equal(calls.attachPersonaProfile.filter((id) => id === "existing-profile-1").length, 1);
+});
+
+test("Update Session failure (cookie import throws) leaves the existing account and Persona link fully intact - nothing is rolled back or removed", async () => {
+  const { pipeline, accountManager, calls, registerFakeProfile } = await freshPipeline({
+    persona: {
+      importPersonaCookies: async () => { throw new Error("simulated Persona API failure"); },
+    },
+  });
+  const { account, profileId } = await seedExistingAccount(accountManager, registerFakeProfile, { username: "account-update-fail" });
+
+  const report = await pipeline.importBatch([tiktokRecord("account-update-fail")], { updateSessionKeys: ["tiktok:account-update-fail"] });
+  const [result] = report.results;
+  assert.equal(result.status, "FAILED");
+  assert.equal(result.cookies, "Failed");
+  // Never a rollback status like "Rolled back" - there is nothing to roll
+  // back, this account/profile already existed before this call.
+  assert.equal(result.autosocial, "Existing");
+  assert.equal(result.persona, "Existing");
+
+  assert.deepEqual(calls.deletePersonaProfile, [], "Update Session must never delete the existing Persona profile, even on failure");
+  const reloaded = await accountManager.getAccountById(account.id);
+  assert.ok(reloaded, "the account must still exist");
+  assert.equal(reloaded.personaProfileId, profileId, "the profile link must be unchanged");
+});
+
+test("Update Session never returns a password/cookie/auth-token value anywhere in the batch report", async () => {
+  const { pipeline, accountManager, registerFakeProfile } = await freshPipeline({ sessionUrl: ACTIVE_URL });
+  await seedExistingAccount(accountManager, registerFakeProfile, { username: "account-secret-check" });
+
+  const report = await pipeline.importBatch(
+    [tiktokRecord("account-secret-check", { password: "TotallySecretUpdatePW", cookies: "sessionid=TOP_SECRET_UPDATE_TOKEN" })],
+    { updateSessionKeys: ["tiktok:account-secret-check"] }
+  );
+  const serialized = JSON.stringify(report);
+  assert.ok(!serialized.includes("TotallySecretUpdatePW"));
+  assert.ok(!serialized.includes("TOP_SECRET_UPDATE_TOKEN"));
+});
+
+test("Update Session requires an explicit, exact key match - a client-supplied key for a DIFFERENT identity never triggers an update", async () => {
+  const { pipeline, accountManager, calls, registerFakeProfile } = await freshPipeline({ sessionUrl: ACTIVE_URL });
+  const { profileId } = await seedExistingAccount(accountManager, registerFakeProfile, { username: "account-real-target" });
+
+  const report = await pipeline.importBatch(
+    [tiktokRecord("account-real-target")],
+    { updateSessionKeys: ["tiktok:some-other-unrelated-username"] }
+  );
+  assert.equal(report.results[0].status, "SKIPPED_DUPLICATE");
+  assert.ok(!calls.attachPersonaProfile.includes(profileId));
+});
+
+// --- clear:true safety check (independent reviewer finding) --------------
+// An account can be manually relinked (via the existing, separate link UI/
+// route - not touched by this feature) to an arbitrary already-existing
+// Persona profile that this pipeline never created itself - e.g. one
+// shared across platforms for manual testing. Wiping that profile's whole
+// cookie jar with clear:true would destroy unrelated domains/sessions it
+// holds, which is exactly what the user's "never clear other domains
+// without necessity" constraint forbids. Update Session must check the
+// profile's own real tags before deciding, not just trust that every
+// linked profile was one it made itself.
+
+test("Update Session uses clear:true (full replace) only for a profile Persona itself confirms was created by this pipeline (tagged autosocial-import)", async () => {
+  const { pipeline, accountManager, calls, registerFakeProfile } = await freshPipeline({ sessionUrl: ACTIVE_URL });
+  await seedExistingAccount(accountManager, registerFakeProfile, {
+    username: "account-pipeline-owned-profile",
+    profileTags: ["autosocial-import", "tiktok"],
+  });
+
+  const report = await pipeline.importBatch(
+    [tiktokRecord("account-pipeline-owned-profile")],
+    { updateSessionKeys: ["tiktok:account-pipeline-owned-profile"] }
+  );
+  assert.equal(report.results[0].status, "READY");
+  assert.equal(report.results[0].cookies, "Imported");
+  assert.equal(calls.importPersonaCookies[0].opts.clear, true);
+});
+
+test("SAFETY: Update Session falls back to a non-destructive MERGE (clear:false), never a full wipe, for a profile it did not create itself (e.g. manually relinked to a shared/multi-purpose profile)", async () => {
+  const { pipeline, accountManager, calls, registerFakeProfile } = await freshPipeline({ sessionUrl: ACTIVE_URL });
+  // Simulates an operator having manually relinked this account (via the
+  // pre-existing, separate link UI) to a profile this pipeline never
+  // created - e.g. no tags at all, or tags unrelated to autosocial-import.
+  await seedExistingAccount(accountManager, registerFakeProfile, {
+    username: "account-manually-relinked",
+    profileTags: [],
+  });
+
+  const report = await pipeline.importBatch(
+    [tiktokRecord("account-manually-relinked")],
+    { updateSessionKeys: ["tiktok:account-manually-relinked"] }
+  );
+  assert.equal(report.results[0].status, "READY");
+  assert.equal(calls.importPersonaCookies[0].opts.clear, false, "a profile of unconfirmed origin must never be fully wiped");
+  assert.match(report.results[0].cookies, /merged/i, "the result must honestly say a merge happened, not an unqualified replace");
+});
+
+test("SAFETY: if Persona's profile list is unreachable while checking provenance, Update Session fails closed to a merge rather than risk an unverified full wipe", async () => {
+  const { pipeline, accountManager, calls, registerFakeProfile } = await freshPipeline({
+    persona: { listPersonaProfiles: async () => { throw new Error("Persona API unreachable"); } },
+    sessionUrl: ACTIVE_URL,
+  });
+  await seedExistingAccount(accountManager, registerFakeProfile, { username: "account-provenance-check-fails" });
+
+  const report = await pipeline.importBatch(
+    [tiktokRecord("account-provenance-check-fails")],
+    { updateSessionKeys: ["tiktok:account-provenance-check-fails"] }
+  );
+  assert.equal(calls.importPersonaCookies[0].opts.clear, false);
+});
+
+test("a client bypassing the UI to send an update key for an account with NO linked Persona profile falls through to SKIPPED_DUPLICATE at the importBatch level (not just in buildPreview)", async () => {
+  const { pipeline, accountManager, calls } = await freshPipeline({ sessionUrl: ACTIVE_URL });
+  await accountManager.addAccount("account-no-profile-direct-api", {
+    importPlatform: "tiktok",
+    importUsername: "account-no-profile-direct-api",
+  });
+
+  const report = await pipeline.importBatch(
+    [tiktokRecord("account-no-profile-direct-api")],
+    { updateSessionKeys: ["tiktok:account-no-profile-direct-api"] }
+  );
+  assert.equal(report.results[0].status, "SKIPPED_DUPLICATE", "processRecord's own re-check must gate this, not just the preview's canUpdateSession");
+  assert.equal(calls.attachPersonaProfile.length, 0);
+  assert.equal(calls.importPersonaCookies.length, 0);
 });
