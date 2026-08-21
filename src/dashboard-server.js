@@ -49,6 +49,7 @@ const { computeAccountPersona, indexProfilesById } = require("./persona-overview
 const { detectFormat } = require("./importers/detector");
 const { buildPreview, importBatch } = require("./importers/pipeline");
 const uploadStore = require("./importers/upload-store");
+const accountDeletion = require("./account-deletion");
 
 // Upload content is a plain-text credentials file read client-side (see
 // web/app.js's use of FileReader) and posted as JSON, not multipart - this
@@ -360,6 +361,32 @@ async function createServer() {
       }
       await stopPersonaProfile(profileId);
       res.json({ ok: true, profileId });
+    } catch (error) {
+      res.status(400).json({ ok: false, error: error.message });
+    }
+  });
+
+  // Account deletion (see src/account-deletion.js). Only ever takes an
+  // accountId - the Persona profile id is always resolved server-side from
+  // the real account record, never accepted from the request, so a
+  // spoofed/wrong id can never be used to delete an unrelated profile.
+  app.post("/api/accounts/delete", async (req, res) => {
+    try {
+      const accountId = req.body?.accountId;
+      const mode = req.body?.mode;
+      if (!accountId) {
+        return res.status(400).json({ ok: false, error: "Missing accountId." });
+      }
+      if (mode !== "remove_only" && mode !== "delete_completely") {
+        return res.status(400).json({ ok: false, error: "mode must be \"remove_only\" or \"delete_completely\"." });
+      }
+      const result = mode === "remove_only"
+        ? await accountDeletion.removeAccountOnly(accountId)
+        : await accountDeletion.deleteCompletely(accountId);
+      if (!result.ok) {
+        return res.status(400).json(result);
+      }
+      res.json(result);
     } catch (error) {
       res.status(400).json({ ok: false, error: error.message });
     }

@@ -502,4 +502,14 @@ async function importBatch(records, { concurrency = DEFAULT_CONCURRENCY, updateS
   return report;
 }
 
-module.exports = { buildPreview, importBatch, DEFAULT_CONCURRENCY, MAX_CONCURRENCY };
+// Read-only visibility into the same concurrency claim importBatch uses,
+// for account-deletion.js: deleting a Persona profile while an import/
+// update-session for the very same (platform, username) is mid-flight
+// would be a real race (the delete could tear down a profile the other
+// operation is actively attached to). Exposes only a query, never the Set
+// itself, so nothing outside this module can claim/release a key.
+function isImportKeyActive(key) {
+  return Boolean(key) && activeImportKeys.has(key);
+}
+
+module.exports = { buildPreview, importBatch, DEFAULT_CONCURRENCY, MAX_CONCURRENCY, isImportKeyActive };
