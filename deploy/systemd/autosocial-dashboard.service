@@ -1,0 +1,32 @@
+# Install: sudo cp deploy/systemd/autosocial-dashboard.service /etc/systemd/system/
+#          sudo systemctl daemon-reload
+#          sudo systemctl enable --now autosocial-dashboard.service
+#
+# Runs AutoSocial's dashboard API (src/dashboard-server.js) as a persistent
+# backing service for CONTENT-OS (/opt/content-os, port 7652). CONTENT-OS's
+# server-side integration adapter (src/server/integrations/autosocial.ts)
+# is the only intended caller — this binds to loopback only (see
+# src/config.js's DASHBOARD_HOST default) and is never exposed publicly,
+# mirroring persona-api.service's own loopback-only setup. HEADLESS=true
+# because this host has no display; Persona-driven session verification
+# during bulk import always attaches headlessly regardless.
+[Unit]
+Description=AutoSocial Dashboard API (CONTENT-OS automation engine)
+After=network.target persona-api.service
+Wants=persona-api.service
+
+[Service]
+Type=simple
+User=claude
+Group=claude
+WorkingDirectory=/opt/autosocial
+Environment=NODE_ENV=production
+Environment=HEADLESS=true
+Environment=DASHBOARD_HOST=127.0.0.1
+Environment=DASHBOARD_PORT=3000
+ExecStart=/usr/bin/node src/dashboard-server.js
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
