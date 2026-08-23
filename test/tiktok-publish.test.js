@@ -163,6 +163,68 @@ test("an unexpected browser error after the publish action starts is unconfirmed
   assert.equal(reloaded.lastPublishStatus, "unconfirmed");
 });
 
+test("a blocking modal failure before Post click stays failed and preserves its safe diagnostic reason", async () => {
+  const { tiktokPublish, accountManager } = await freshTiktokPublish({
+    uploadResult: {
+      ok: false,
+      error: "TikTok blocking dialog remained after safe action \"cancel\".",
+      diagnosticCode: "BLOCKING_MODAL_UNRESOLVED",
+      externalActionStarted: false,
+    },
+  });
+  const account = await seedTiktokAccount(accountManager);
+  const result = await tiktokPublish.publish(account.id, { videoBuffer: FAKE_VIDEO });
+  assert.equal(result.finalStatus, "failed");
+  assert.match(result.reason, /blocking tiktok dialog/i);
+  assert.match(result.reason, /remained after safe action/i);
+});
+
+test("Post button unavailable before click is failed with a concrete reason", async () => {
+  const { tiktokPublish, accountManager } = await freshTiktokPublish({
+    uploadResult: {
+      ok: false,
+      error: "Could not find an enabled Publish/Post button after 6 attempts.",
+      diagnosticCode: "POST_BUTTON_UNAVAILABLE",
+      externalActionStarted: false,
+    },
+  });
+  const account = await seedTiktokAccount(accountManager);
+  const result = await tiktokPublish.publish(account.id, { videoBuffer: FAKE_VIDEO });
+  assert.equal(result.finalStatus, "failed");
+  assert.match(result.reason, /post button was unavailable/i);
+});
+
+test("pre-click browser diagnostics redact URLs, paths, and secrets", async () => {
+  const { tiktokPublish, accountManager } = await freshTiktokPublish({
+    uploadResult: {
+      ok: false,
+      error: "Browser failed at wss://host/devtools?token=abc /tmp/private/video.mov token=secret-value",
+      diagnosticCode: "PRE_CLICK_BROWSER_FAILURE",
+      externalActionStarted: false,
+    },
+  });
+  const account = await seedTiktokAccount(accountManager);
+  const result = await tiktokPublish.publish(account.id, { videoBuffer: FAKE_VIDEO });
+  assert.equal(result.finalStatus, "failed");
+  assert.doesNotMatch(result.reason, /host|\/tmp\/private|secret-value|token=abc/);
+  assert.match(result.reason, /redacted/);
+});
+
+test("lost confirmation after Post click is unconfirmed even when the browser error looks local", async () => {
+  const { tiktokPublish, accountManager } = await freshTiktokPublish({
+    uploadResult: {
+      ok: false,
+      error: "Target page closed before confirmation",
+      diagnosticCode: "POST_CLICK_UNCONFIRMED",
+      externalActionStarted: true,
+    },
+  });
+  const account = await seedTiktokAccount(accountManager);
+  const result = await tiktokPublish.publish(account.id, { videoBuffer: FAKE_VIDEO });
+  assert.equal(result.finalStatus, "unconfirmed");
+  assert.match(result.reason, /action started/i);
+});
+
 test("a click alone (upload never actually confirmed ok:true) never becomes 'published'", async () => {
   const { tiktokPublish, accountManager } = await freshTiktokPublish({
     uploadResult: { ok: false, error: "could not locate the video file input" },

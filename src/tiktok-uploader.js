@@ -100,6 +100,153 @@ function normalizeUiText(value) {
   return String(value || "").trim().replace(/\s+/g, " ").toLowerCase();
 }
 
+function workflowError(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
+function safeDialogSummary(text) {
+  return String(text || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 160) || "unidentified dialog";
+}
+
+function selectKnownDialogAction(dialogText, buttonTexts) {
+  const text = normalizeUiText(dialogText);
+  const buttons = buttonTexts.map((value) => ({ raw: value, normalized: normalizeUiText(value) }));
+  const find = (...labels) => buttons.find(({ normalized }) => labels.includes(normalized));
+
+  // Incident fixture: enabling content checks is optional. Prefer the
+  // non-mutating Cancel choice and never opt into a setting on the account.
+  if (/automatic content checks|music copyright check|content check lite/.test(text)) {
+    return find("cancel", "not now", "skip", "decline");
+  }
+
+  // Known informational TikTok Studio hints may be acknowledged. Keep this
+  // deliberately narrow: unknown dialogs fail closed below.
+  if (/new editing features|what(?:'|’)s new|welcome to tiktok studio/.test(text)) {
+    return find("got it", "close", "not now", "skip");
+  }
+
+  return null;
+}
+
+async function resolveBlockingOverlays(page, { maxPasses = 3, disappearTimeoutMs = 3000 } = {}) {
+  for (let pass = 0; pass < maxPasses; pass += 1) {
+    // Locators, not ElementHandles: every pass re-evaluates the live DOM.
+    const dialogs = page.locator(
+      "[role='dialog'], [aria-modal='true'], [class*='modal' i], [class*='dialog' i]"
+    );
+    const count = await dialogs.count();
+    let visibleDialog = null;
+    for (let i = 0; i < count; i += 1) {
+      const candidate = dialogs.nth(i);
+      if (await candidate.isVisible().catch(() => false)) {
+        visibleDialog = candidate;
+        break;
+      }
+    }
+
+    if (!visibleDialog) return { resolved: true, passes: pass };
+
+    const dialogText = await visibleDialog.innerText().catch(() => "");
+    const actions = visibleDialog.locator("button, [role='button']");
+    const actionCount = await actions.count();
+    const buttonTexts = [];
+    for (let i = 0; i < actionCount; i += 1) {
+      const action = actions.nth(i);
+      if (await action.isVisible().catch(() => false)) {
+        buttonTexts.push(await action.innerText().catch(() => ""));
+      }
+    }
+
+    const selected = selectKnownDialogAction(dialogText, buttonTexts);
+    if (!selected) {
+      throw workflowError(
+        "BLOCKING_MODAL_UNRESOLVED",
+        `Unknown blocking TikTok dialog: ${safeDialogSummary(dialogText)}`
+      );
+    }
+
+    const selectedText = normalizeUiText(selected.raw);
+    let clicked = false;
+    // Re-query the dialog and its actions immediately before clicking. Scope
+    // to the same dialog summary so a second modal's identically named
+    // Cancel button can never be selected accidentally.
+    const liveDialogs = page.locator(
+      "[role='dialog'], [aria-modal='true'], [class*='modal' i], [class*='dialog' i]"
+    );
+    let liveDialog = null;
+    const liveDialogCount = await liveDialogs.count();
+    const expectedSummary = safeDialogSummary(dialogText);
+    for (let i = 0; i < liveDialogCount; i += 1) {
+      const candidate = liveDialogs.nth(i);
+      if (!(await candidate.isVisible().catch(() => false))) continue;
+      const summary = safeDialogSummary(await candidate.innerText().catch(() => ""));
+      if (summary === expectedSummary) {
+        liveDialog = candidate;
+        break;
+      }
+    }
+    if (!liveDialog) {
+      // The original dialog disappeared on its own; restart from the live DOM.
+      continue;
+    }
+    const liveActions = liveDialog.locator("button, [role='button']");
+    const liveCount = await liveActions.count();
+    for (let i = 0; i < liveCount; i += 1) {
+      const action = liveActions.nth(i);
+      const actionText = normalizeUiText(await action.innerText().catch(() => ""));
+      if (actionText !== selectedText || !(await action.isVisible().catch(() => false))) continue;
+      if (await action.isDisabled().catch(() => false)) continue;
+      await action.click({ timeout: 3000 });
+      clicked = true;
+      break;
+    }
+
+    if (!clicked) {
+      throw workflowError(
+        "BLOCKING_MODAL_UNRESOLVED",
+        `Known TikTok dialog action "${selectedText}" was unavailable.`
+      );
+    }
+
+    const deadline = Date.now() + disappearTimeoutMs;
+    let disappeared = false;
+    while (Date.now() <= deadline) {
+      const currentDialogs = page.locator(
+        "[role='dialog'], [aria-modal='true'], [class*='modal' i], [class*='dialog' i]"
+      );
+      const currentCount = await currentDialogs.count();
+      let originalStillVisible = false;
+      for (let i = 0; i < currentCount; i += 1) {
+        const candidate = currentDialogs.nth(i);
+        if (!(await candidate.isVisible().catch(() => false))) continue;
+        const summary = safeDialogSummary(await candidate.innerText().catch(() => ""));
+        if (summary === expectedSummary) {
+          originalStillVisible = true;
+          break;
+        }
+      }
+      if (!originalStillVisible) {
+        disappeared = true;
+        break;
+      }
+      await page.waitForTimeout(100);
+    }
+    if (!disappeared) {
+      throw workflowError(
+        "BLOCKING_MODAL_UNRESOLVED",
+        `TikTok blocking dialog remained after safe action "${selectedText}".`
+      );
+    }
+  }
+
+  throw workflowError("BLOCKING_MODAL_UNRESOLVED", `TikTok blocking dialogs exceeded ${maxPasses} resolution passes.`);
+}
+
 function getPublishCandidateScore(info, publishTerms = uiLabels.terms("tiktokPublish")) {
   const text = normalizeUiText(info?.text || info?.ariaLabel);
   if (!text || info?.disabled || info?.inNavigation) {
@@ -688,57 +835,8 @@ async function disableShortContentCheck(page) {
   console.log("Short content check toggle found but could not be switched off.");
 }
 
-async function clickFirstVisibleButton(page, nameRegex, timeout = 3000) {
-  const button = page.getByRole("button", { name: nameRegex }).first();
-  if ((await button.count()) === 0) {
-    return false;
-  }
-  try {
-    await button.click({ timeout });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 async function dismissInterferingOverlays(page) {
-  await page
-    .getByRole("button", { name: uiLabels.pattern("tiktokCancel") })
-    .click({ timeout: 800 })
-    .catch(() => { });
-
-  // TikTok Studio sometimes opens "content checks" and other hints dialogs
-  // that block the publish button; dismiss/accept them before publishing.
-  const overlayActions = [
-    uiLabels.pattern("tiktokEnable"),
-    uiLabels.pattern("tiktokContinue"),
-    uiLabels.pattern("tiktokLater"),
-    uiLabels.pattern("tiktokClose"),
-  ];
-
-  for (let pass = 0; pass < 3; pass += 1) {
-    let clickedSomething = false;
-    for (const action of overlayActions) {
-      const clicked = await clickFirstVisibleButton(page, action, 1200);
-      if (clicked) {
-        clickedSomething = true;
-        await page.waitForTimeout(400);
-      }
-    }
-
-    const closeIcon = page
-      .locator(uiLabels.attrSelector("button", "aria-label", "tiktokClose"))
-      .first();
-    if ((await closeIcon.count()) > 0) {
-      await closeIcon.click({ timeout: 1200 }).catch(() => { });
-      clickedSomething = true;
-      await page.waitForTimeout(300);
-    }
-
-    if (!clickedSomething) {
-      break;
-    }
-  }
+  return resolveBlockingOverlays(page);
 }
 
 async function scrollToBottom(page) {
@@ -902,7 +1000,7 @@ async function clickPublish(page) {
     await page.waitForTimeout(2000);
   }
 
-  throw new Error("Could not find an enabled Publish/Post button after 6 attempts.");
+  throw workflowError("POST_BUTTON_UNAVAILABLE", "Could not find an enabled Publish/Post button after 6 attempts.");
 }
 
 function hasSuccessCueText(text) {
@@ -1201,19 +1299,26 @@ async function uploadVideo({ videoPath, caption, source, accountId }) {
   let closeHoldMs = 0;
   let publishResponseTracker = null;
   let externalActionStarted = false;
+  let stage = "browser";
 
   try {
+    stage = "upload_page";
     await gotoUploadPage(page);
+    stage = "upload";
     await setVideoFile(page, absoluteVideoPath);
     await waitForUploadReady(page);
+    stage = "caption";
     await setCaption(page, caption || config.defaultCaption);
+    stage = "editor_overlays";
     await addDefaultSound(page, source).catch((error) => {
       console.log(`Sound step failed softly: ${error.message}`);
     });
     await disableShortContentCheck(page);
     publishResponseTracker = createPublishResponseTracker(page);
+    stage = "post_click";
     await clickPublish(page);
     externalActionStarted = true;
+    stage = "confirmation";
     const confirmation = await waitForPublishConfirmation(page, publishResponseTracker);
     if (!confirmation.ok) {
       throw new Error(`Publish verification failed: ${confirmation.reason}`);
@@ -1236,9 +1341,16 @@ async function uploadVideo({ videoPath, caption, source, accountId }) {
     );
     await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => { });
     closeHoldMs = Math.max(config.failureHoldMs, 0);
+    const diagnosticCode = error.code || (
+      externalActionStarted ? "POST_CLICK_UNCONFIRMED"
+        : stage === "upload" ? "UPLOAD_FAILED"
+          : stage === "caption" ? "CAPTION_INPUT_FAILED"
+            : "PRE_CLICK_BROWSER_FAILURE"
+    );
     return {
       ok: false,
       error: error.message,
+      diagnosticCode,
       screenshotPath,
       externalActionStarted,
     };
@@ -1262,5 +1374,7 @@ module.exports = {
   _private: {
     getPublishCandidateScore,
     isLikelyPublishCandidateInfo,
+    resolveBlockingOverlays,
+    selectKnownDialogAction,
   },
 };

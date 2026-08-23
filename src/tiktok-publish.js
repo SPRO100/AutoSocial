@@ -21,12 +21,27 @@ function safeMessage(error) {
   return error && error.message ? error.message : String(error);
 }
 
+function safeDiagnosticDetail(value) {
+  return String(value || "")
+    .replace(/\b(?:https?|wss?):\/\/\S+/gi, "[redacted-url]")
+    .replace(/(?:^|\s)(?:\/[\w.@+-]+){2,}/g, " [redacted-path]")
+    .replace(/[A-Za-z]:\\(?:[^\s\\]+\\)+[^\s]*/g, "[redacted-path]")
+    .replace(/\b(cookie|token|authorization|password|secret)\s*[=:]\s*\S+/gi, "$1=[redacted]")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 300);
+}
+
 // Maps tiktok-uploader.js's own real confirmation reasons (see its
 // waitForPublishConfirmation) to a safe, human-readable operational
 // message - never the raw internal string, but never a fabricated generic
 // either when a more specific one is known.
-function classifyPublishError(rawMessage, externalActionStarted = false) {
+function classifyPublishError(rawMessage, externalActionStarted = false, diagnosticCode = "") {
   const message = String(rawMessage || "");
+  const safeDetail = safeDiagnosticDetail(message);
+
+  // The click boundary is authoritative. Any unexpected result after it is
+  // ambiguous unless TikTok itself supplied a definite rejection.
   if (/no reliable publish confirmation observed within timeout/i.test(message)) {
     return { status: "unconfirmed", reason: "Publish confirmation timed out." };
   }
@@ -36,13 +51,25 @@ function classifyPublishError(rawMessage, externalActionStarted = false) {
   if (/publish (api call )?fail/i.test(message)) {
     return { status: "failed", reason: "TikTok rejected the publish." };
   }
-  if (/set.*video file|video file input|could not.*video/i.test(message)) {
-    return { status: "failed", reason: "Video upload failed." };
-  }
   if (externalActionStarted) {
-    return { status: "unconfirmed", reason: "The publish action started but its outcome could not be confirmed." };
+    return {
+      status: "unconfirmed",
+      reason: safeDetail
+        ? `The publish action started but its outcome could not be confirmed: ${safeDetail}`
+        : "The publish action started but its outcome could not be confirmed.",
+    };
   }
-  return { status: "failed", reason: "Publish failed." };
+
+  const prefixes = {
+    UPLOAD_FAILED: "Video upload failed",
+    CAPTION_INPUT_FAILED: "Caption input failed",
+    BLOCKING_MODAL_UNRESOLVED: "Blocking TikTok dialog could not be resolved",
+    POST_BUTTON_UNAVAILABLE: "TikTok Post button was unavailable",
+    PRE_CLICK_BROWSER_FAILURE: "TikTok browser workflow failed before Post click",
+  };
+  const prefix = prefixes[diagnosticCode] ||
+    (/set.*video file|video file input|could not.*video/i.test(message) ? "Video upload failed" : "TikTok workflow failed before Post click");
+  return { status: "failed", reason: safeDetail ? `${prefix}: ${safeDetail}` : `${prefix}.` };
 }
 
 // Preconditions only - read-only, never mutates anything, never attaches.
@@ -135,7 +162,11 @@ async function publish(accountId, { videoBuffer, filename, caption } = {}) {
       };
     }
 
-    const classified = classifyPublishError(uploadResult.error, uploadResult.externalActionStarted);
+    const classified = classifyPublishError(
+      uploadResult.error,
+      uploadResult.externalActionStarted,
+      uploadResult.diagnosticCode
+    );
     await accountManager.setPublishStatus(accountId, {
       status: classified.status,
       reason: classified.reason,
