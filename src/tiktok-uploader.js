@@ -165,8 +165,91 @@ function selectKnownDialogAction(dialogText, buttonTexts) {
   return null;
 }
 
+function selectSafeCookieAction(buttons) {
+  const safe = new Set([
+    "decline optional cookies", "reject optional cookies", "reject all",
+    "only necessary", "necessary only", "close", "dismiss",
+  ]);
+  return buttons
+    .map((raw) => ({ raw, normalized: normalizeUiText(raw) }))
+    .find(({ normalized }) => safe.has(normalized));
+}
+
+async function findCookieBanner(page) {
+  const candidates = page.locator(
+    "[role='dialog'], [class*='cookie' i], [id*='cookie' i], [data-testid*='cookie' i], [aria-label*='cookie' i]"
+  );
+  let best = null;
+  let bestTextLength = Number.POSITIVE_INFINITY;
+  const inspect = async (candidateLocator) => {
+    const count = await candidateLocator.count();
+    for (let i = 0; i < count; i += 1) {
+      const candidate = candidateLocator.nth(i);
+      if (!(await candidate.isVisible().catch(() => false))) continue;
+      const text = await candidate.innerText().catch(() => "");
+      if (!/allow cookies from tiktok|optional cookies|cookies policy/i.test(text)) continue;
+      if (await candidate.locator("button, [role='button']").count() === 0) continue;
+      if (text.length < bestTextLength) {
+        best = candidate;
+        bestTextLength = text.length;
+      }
+    }
+  };
+  await inspect(candidates);
+  // Some consent UIs intentionally use generated class names and no dialog
+  // role.  A text-scoped fallback remains bounded and still requires a
+  // semantic cookie phrase plus an explicit button before any action.
+  if (!best) {
+    await inspect(page.locator("body div").filter({ hasText: /allow cookies from tiktok|optional cookies|cookies policy/i }));
+  }
+  return best;
+}
+
+async function resolveCookieBanner(page, { disappearTimeoutMs = 3000 } = {}) {
+  const banner = await findCookieBanner(page);
+  if (!banner) return false;
+  const bannerText = await banner.innerText().catch(() => "");
+  const actions = banner.locator("button, [role='button']");
+  const actionTexts = [];
+  const actionCount = await actions.count();
+  for (let i = 0; i < actionCount; i += 1) {
+    const action = actions.nth(i);
+    if (await action.isVisible().catch(() => false)) actionTexts.push(await action.innerText().catch(() => ""));
+  }
+  const selected = selectSafeCookieAction(actionTexts);
+  if (!selected) {
+    throw workflowError("COOKIE_BANNER_FAILED", `TikTok cookie banner has no safe dismiss action: ${safeDialogSummary(bannerText)}`);
+  }
+
+  // Re-find the banner and its action after every DOM transition. Never keep
+  // an ElementHandle across the consent UI's React update.
+  const liveBanner = await findCookieBanner(page);
+  if (!liveBanner) return true;
+  const liveActions = liveBanner.locator("button, [role='button']");
+  let clicked = false;
+  for (let i = 0; i < await liveActions.count(); i += 1) {
+    const action = liveActions.nth(i);
+    if (normalizeUiText(await action.innerText().catch(() => "")) !== normalizeUiText(selected.raw)) continue;
+    if (!(await action.isVisible().catch(() => false)) || await action.isDisabled().catch(() => false)) continue;
+    await action.click({ timeout: 3000 });
+    clicked = true;
+    break;
+  }
+  if (!clicked) throw workflowError("COOKIE_BANNER_FAILED", `TikTok cookie banner action "${normalizeUiText(selected.raw)}" was unavailable.`);
+
+  const deadline = Date.now() + disappearTimeoutMs;
+  while (Date.now() <= deadline) {
+    if (!await findCookieBanner(page)) return true;
+    await page.waitForTimeout(100);
+  }
+  throw workflowError("COOKIE_BANNER_FAILED", "TikTok cookie banner remained after safe dismiss action.");
+}
+
 async function resolveBlockingOverlays(page, { maxPasses = 3, disappearTimeoutMs = 3000 } = {}) {
   for (let pass = 0; pass < maxPasses; pass += 1) {
+    // Cookie consent is often not marked role=dialog and can sit above the
+    // editor modal. Resolve it first, then re-evaluate the live DOM.
+    await resolveCookieBanner(page, { disappearTimeoutMs });
     // Locators, not ElementHandles: every pass re-evaluates the live DOM.
     const dialogs = page.locator(
       "[role='dialog'], [aria-modal='true'], [class*='modal' i], [class*='dialog' i]"
@@ -937,6 +1020,10 @@ async function clickPublish(page, { onExternalActionBoundary } = {}) {
   for (let attempt = 0; attempt < 6; attempt += 1) {
     await scrollToBottom(page);
     await page.waitForTimeout(500);
+    // TikTok can mount a modal or cookie layer during scrolling. Resolve it
+    // immediately before discovery so the Post locator is always derived
+    // from the current, unobstructed DOM.
+    await dismissInterferingOverlays(page);
 
     const clicked = await tryClickPublishButton(page, onExternalActionBoundary);
     if (clicked) {
@@ -1311,6 +1398,7 @@ module.exports = {
     getPublishCandidateScore,
     isLikelyPublishCandidateInfo,
     resolveBlockingOverlays,
+    resolveCookieBanner,
     selectKnownDialogAction,
     setCaption,
     waitForPublishConfirmation,

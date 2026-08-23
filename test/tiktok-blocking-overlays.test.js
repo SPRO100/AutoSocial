@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const { chromium } = require("playwright");
 
 const { _private } = require("../src/tiktok-uploader");
-const { resolveBlockingOverlays, selectKnownDialogAction, setCaption, waitForPublishConfirmation } = _private;
+const { resolveBlockingOverlays, resolveCookieBanner, selectKnownDialogAction, setCaption, waitForPublishConfirmation } = _private;
 
 async function withPage(fn) {
   const browser = await chromium.launch({ headless: true });
@@ -39,6 +39,33 @@ test("incident regression: automatic content checks dialog is safely cancelled, 
     // Fresh locator after overlay mutation: no stale ElementHandle reuse.
     const livePost = page.locator("#post");
     assert.equal(await livePost.isVisible(), true);
+  });
+});
+
+test("cookie consent is declined safely before the content-check modal and both transitions re-evaluate the DOM", async () => {
+  await withPage(async (page) => {
+    await page.setContent(`
+      <main><div id="actions"></div></main>
+      <div id="cookie-banner"><p>Allow cookies from TikTok on this browser?</p><button id="decline">Decline optional cookies</button><button id="allow">Allow all</button></div>
+      <div role="dialog" aria-modal="true" id="checks"><h2>Turn on automatic content checks?</h2><button id="cancel">Cancel</button><button>Turn on</button></div>
+      <script>
+        window.clicked = [];
+        document.querySelector('#decline').onclick = () => { window.clicked.push('decline'); document.querySelector('#cookie-banner').remove(); };
+        document.querySelector('#cancel').onclick = () => { window.clicked.push('cancel'); document.querySelector('#checks').remove(); document.querySelector('#actions').innerHTML = '<button id="post">Post</button>'; };
+      </script>
+    `);
+    const result = await resolveBlockingOverlays(page);
+    assert.equal(result.resolved, true);
+    assert.deepEqual(await page.evaluate(() => window.clicked), ['decline', 'cancel']);
+    assert.equal(await page.locator('#post').isVisible(), true);
+  });
+});
+
+test("cookie banner fails closed when it offers no safe non-consent action", async () => {
+  await withPage(async (page) => {
+    await page.setContent(`<div id="cookie-banner"><p>Allow cookies from TikTok on this browser?</p><button>Allow all</button></div>`);
+    await assert.rejects(resolveCookieBanner(page), (error) => error.code === "COOKIE_BANNER_FAILED");
+    assert.equal(await page.locator('#cookie-banner').isVisible(), true);
   });
 });
 
