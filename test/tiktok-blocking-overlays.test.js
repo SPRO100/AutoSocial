@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const { chromium } = require("playwright");
 
 const { _private } = require("../src/tiktok-uploader");
-const { resolveBlockingOverlays, selectKnownDialogAction, setCaption } = _private;
+const { resolveBlockingOverlays, selectKnownDialogAction, setCaption, waitForPublishConfirmation } = _private;
 
 async function withPage(fn) {
   const browser = await chromium.launch({ headless: true });
@@ -141,4 +141,52 @@ test("caption resolver fails closed when no supported editor exists", async () =
     );
     assert.equal(await page.locator('[contenteditable="true"]').innerText(), "unrelated editor");
   });
+});
+
+test("confirmation polling never clicks the primary Post action again", async () => {
+  let primaryPostLookups = 0;
+  const empty = {
+    count: async () => 0,
+    locator() { return this; },
+    filter() { return this; },
+    innerText: async () => "",
+  };
+  const page = {
+    url: () => "https://www.tiktok.com/tiktokstudio/upload",
+    locator: (selector) => selector === "body" ? { innerText: async () => "" } : empty,
+    getByRole: (_role, options) => {
+      if (String(options?.name).toLowerCase() === "/post/i") primaryPostLookups += 1;
+      return empty;
+    },
+    waitForTimeout: async () => {},
+    off: () => {},
+  };
+  const tracker = { failure: () => null, success: () => false };
+  const result = await waitForPublishConfirmation(page, tracker);
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /no reliable publish confirmation/i);
+  assert.equal(primaryPostLookups, 0);
+});
+
+test("confirmation polling attempts a secondary confirmation at most once", async () => {
+  let confirmClicks = 0;
+  const confirm = {
+    count: async () => 1,
+    locator() { return this; }, filter() { return this; }, nth() { return this; },
+    isVisible: async () => true,
+    evaluate: async () => ({ text: "Confirm", ariaLabel: "Confirm", dataAttributes: {}, disabled: false, href: "", inNavigation: false, rect: { left: 500, right: 620, top: 700, bottom: 740, width: 120, height: 40 }, role: "button", tagName: "BUTTON", type: "button", viewportHeight: 800, viewportWidth: 1200 }),
+    scrollIntoViewIfNeeded: async () => {},
+    click: async () => { confirmClicks += 1; },
+  };
+  const empty = { count: async () => 0, locator() { return this; }, filter() { return this; } };
+  const dialog = { locator: () => confirm, filter() { return this; }, count: async () => 1 };
+  const page = {
+    url: () => "https://www.tiktok.com/tiktokstudio/upload",
+    locator: (selector) => selector === "body" ? { innerText: async () => "" } : selector.includes("dialog") ? dialog : empty,
+    getByRole: () => empty,
+    waitForTimeout: async () => {}, off: () => {},
+  };
+  const result = await waitForPublishConfirmation(page, { failure: () => null, success: () => false });
+  assert.equal(result.ok, false);
+  assert.equal(confirmClicks, 1);
 });

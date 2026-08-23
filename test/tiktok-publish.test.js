@@ -223,6 +223,29 @@ test("lost confirmation after Post click is unconfirmed even when the browser er
   const result = await tiktokPublish.publish(account.id, { videoBuffer: FAKE_VIDEO });
   assert.equal(result.finalStatus, "unconfirmed");
   assert.match(result.reason, /action started/i);
+  assert.deepEqual(result.diagnostic, {
+    code: "POST_CLICK_UNCONFIRMED",
+    phase: "confirmation",
+    message: result.reason,
+    externalActionStarted: true,
+    postClick: true,
+    safeToRetry: false,
+    remotePostId: null,
+    remotePostUrl: null,
+  });
+});
+
+test("pre-click failure exposes a bounded safe structured diagnostic", async () => {
+  const { tiktokPublish, accountManager } = await freshTiktokPublish({
+    uploadResult: { ok: false, error: "Caption editor missing", diagnosticCode: "CAPTION_INPUT_FAILED", phase: "caption", externalActionStarted: false },
+  });
+  const account = await seedTiktokAccount(accountManager);
+  const result = await tiktokPublish.publish(account.id, { videoBuffer: FAKE_VIDEO });
+  assert.equal(result.finalStatus, "failed");
+  assert.equal(result.diagnostic.code, "CAPTION_INPUT_FAILED");
+  assert.equal(result.diagnostic.phase, "caption");
+  assert.equal(result.diagnostic.safeToRetry, true);
+  assert.equal(result.diagnostic.postClick, false);
 });
 
 test("a click alone (upload never actually confirmed ok:true) never becomes 'published'", async () => {

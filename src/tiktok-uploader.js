@@ -84,7 +84,7 @@ async function setCaption(page, caption) {
     await page.waitForTimeout(500);
   }
 
-  if (editorObserved) throw workflowError("CAPTION_INPUT_FAILED", "Caption editor was found but its value could not be set and verified.");
+  if (editorObserved) throw workflowError("CAPTION_VERIFICATION_FAILED", "Caption editor was found but its value could not be set and verified.");
   throw workflowError("CAPTION_INPUT_FAILED", "Could not find a supported TikTok caption editor.");
 }
 
@@ -158,7 +158,7 @@ function selectKnownDialogAction(dialogText, buttonTexts) {
 
   // Known informational TikTok Studio hints may be acknowledged. Keep this
   // deliberately narrow: unknown dialogs fail closed below.
-  if (/new editing features|what(?:'|’)s new|welcome to tiktok studio/.test(text)) {
+  if (/new editing features|what(?:'|\u2019)s new|welcome to tiktok studio/.test(text)) {
     return find("got it", "close", "not now", "skip");
   }
 
@@ -409,7 +409,7 @@ async function getPublishCandidateInfo(candidate) {
   });
 }
 
-async function clickFirstLikelyPublishLocator(page, locator, publishTerms = uiLabels.terms("tiktokPublish")) {
+async function clickFirstLikelyPublishLocator(page, locator, publishTerms = uiLabels.terms("tiktokPublish"), onExternalActionBoundary) {
   const total = await locator.count();
   if (total === 0) {
     return false;
@@ -442,9 +442,10 @@ async function clickFirstLikelyPublishLocator(page, locator, publishTerms = uiLa
   for (const entry of candidates) {
     const { candidate, info, score } = entry;
 
+    await candidate.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
+    await page.waitForTimeout(250);
+    onExternalActionBoundary?.();
     try {
-      await candidate.scrollIntoViewIfNeeded({ timeout: 3000 });
-      await page.waitForTimeout(250);
       await candidate.click({ timeout: 5000 });
       const rect = info?.rect || {};
       console.log(
@@ -453,19 +454,10 @@ async function clickFirstLikelyPublishLocator(page, locator, publishTerms = uiLa
           `${Math.round(Number(rect.width) || 0)}x${Math.round(Number(rect.height) || 0)}`
       );
       return true;
-    } catch {
-      try {
-        await candidate.click({ timeout: 5000, force: true });
-        const rect = info?.rect || {};
-        console.log(
-          `Publish candidate force-clicked: "${normalizeUiText(info?.text || info?.ariaLabel)}" score=${score.toFixed(1)} ` +
-            `rect=${Math.round(Number(rect.left) || 0)},${Math.round(Number(rect.top) || 0)},` +
-            `${Math.round(Number(rect.width) || 0)}x${Math.round(Number(rect.height) || 0)}`
-        );
-        return true;
-      } catch {
-        // Continue to next candidate.
-      }
+    } catch (error) {
+      // Never force-click or try another candidate after a validated Post
+      // click was attempted: Playwright may throw after dispatching it.
+      throw workflowError("POST_CLICK_UNCONFIRMED", `Post click outcome could not be observed: ${error.message}`);
     }
   }
 
@@ -876,7 +868,7 @@ async function scrollToBottom(page) {
   await page.waitForTimeout(600);
 }
 
-async function tryClickPublishButton(page) {
+async function tryClickPublishButton(page, onExternalActionBoundary) {
   // Strategy 1: exact text buttons (most reliable on TikTok Studio)
   const exactSelectors = [
     uiLabels.textSelector("button", "tiktokPublish"),
@@ -885,7 +877,7 @@ async function tryClickPublishButton(page) {
 
   for (const selector of exactSelectors) {
     const locator = page.locator(selector);
-    const clicked = await clickFirstLikelyPublishLocator(page, locator);
+    const clicked = await clickFirstLikelyPublishLocator(page, locator, uiLabels.terms("tiktokPublish"), onExternalActionBoundary);
     if (clicked) {
       console.log(`Publish click strategy: exact selector ${selector}`);
       return true;
@@ -899,7 +891,7 @@ async function tryClickPublishButton(page) {
 
   for (const textPattern of roleTexts) {
     const button = page.getByRole("button", { name: textPattern });
-    const clicked = await clickFirstLikelyPublishLocator(page, button);
+    const clicked = await clickFirstLikelyPublishLocator(page, button, uiLabels.terms("tiktokPublish"), onExternalActionBoundary);
     if (clicked) {
       console.log(`Publish click strategy: role ${textPattern}`);
       return true;
@@ -917,7 +909,7 @@ async function tryClickPublishButton(page) {
 
   for (const selector of cssSelectors) {
     const el = page.locator(selector);
-    const clicked = await clickFirstLikelyPublishLocator(page, el);
+    const clicked = await clickFirstLikelyPublishLocator(page, el, uiLabels.terms("tiktokPublish"), onExternalActionBoundary);
     if (clicked) {
       console.log(`Publish click strategy: css ${selector}`);
       return true;
@@ -929,100 +921,24 @@ async function tryClickPublishButton(page) {
 
   for (const label of textLabels) {
     const el = page.locator(`text="${label}"`);
-    const clicked = await clickFirstLikelyPublishLocator(page, el);
+    const clicked = await clickFirstLikelyPublishLocator(page, el, uiLabels.terms("tiktokPublish"), onExternalActionBoundary);
     if (clicked) {
       console.log(`Publish click strategy: text ${label}`);
       return true;
     }
   }
 
-  // Strategy 5: brute-force - find any likely submit element by text.
-  const publishTerms = uiLabels.terms("tiktokPublish").map((term) => term.toLowerCase());
-  const clicked = await page.evaluate((labels) => {
-    const normalize = (value) => String(value || "").trim().replace(/\s+/g, " ").toLowerCase();
-    const normalizedLabels = labels.map(normalize).filter(Boolean);
-    const isPublishText = (text) => {
-      const exactMatch = normalizedLabels.includes(text);
-      const nonAmbiguousMatch = normalizedLabels
-        .filter((label) => label !== "post")
-        .some((label) => text.includes(label));
-      return exactMatch || nonAmbiguousMatch;
-    };
-    const isLikelyCandidate = (btn) => {
-      const text = normalize(btn.textContent || btn.getAttribute("aria-label"));
-      if (!text || text === "posts" || !isPublishText(text)) {
-        return false;
-      }
-      if (btn.disabled || btn.getAttribute("aria-disabled") === "true") {
-        return false;
-      }
-      if (
-        btn.closest(
-          "nav, aside, [role='navigation'], [class*='sidebar' i], [class*='side-bar' i], [class*='sidenav' i], [class*='side-nav' i], [class*='menu' i]"
-        )
-      ) {
-        return false;
-      }
-      const anchor = btn.closest("a");
-      const href = normalize(anchor ? anchor.getAttribute("href") : "");
-      if (href && /\/(post|posts|analytics|comment|home|inspiration|monetization|academy|sound|feedback)(\/|$|\?)/i.test(href)) {
-        return false;
-      }
-      const rect = btn.getBoundingClientRect();
-      const mainContentBoundary = window.innerWidth >= 900 ? Math.min(300, window.innerWidth * 0.25) : 0;
-      if (window.innerWidth >= 900 && rect.right <= mainContentBoundary) {
-        return false;
-      }
-      const className = normalize(btn.className || "");
-      const hasPublishCue = /\b(post|publish|submit)\b/.test(className);
-      if (text === "post" && window.innerHeight >= 600 && rect.top < window.innerHeight * 0.5 && !hasPublishCue) {
-        return false;
-      }
-      return true;
-    };
-    const scoreCandidate = (btn) => {
-      const text = normalize(btn.textContent || btn.getAttribute("aria-label"));
-      const rect = btn.getBoundingClientRect();
-      const className = normalize(btn.className || "");
-      let score = 0;
-      if (normalizedLabels.includes(text)) score += 30;
-      if (btn.tagName.toLowerCase() === "button") score += 20;
-      if (normalize(btn.getAttribute("type")) === "submit") score += 20;
-      if (/\b(post|publish|submit)\b/.test(className)) score += 20;
-      if (rect.width >= 80 && rect.height >= 28) score += 15;
-      if (window.innerHeight > 0 && rect.top >= window.innerHeight * 0.5) score += 60;
-      if (window.innerWidth >= 900 && rect.left >= Math.min(300, window.innerWidth * 0.25)) score += 20;
-      score += Math.min(20, Math.max(0, rect.top / 40));
-      return score;
-    };
-
-    const buttons = Array.from(document.querySelectorAll("button, [role='button']"));
-    const candidates = buttons
-      .filter(isLikelyCandidate)
-      .map((btn) => ({ btn, score: scoreCandidate(btn), top: btn.getBoundingClientRect().top }))
-      .sort((a, b) => b.score - a.score || b.top - a.top);
-    if (candidates.length > 0) {
-      candidates[0].btn.scrollIntoView({ block: "center" });
-      candidates[0].btn.click();
-      return true;
-    }
-    return false;
-  }, publishTerms);
-  if (clicked) {
-    console.log("Publish click strategy: DOM evaluate fallback");
-  }
-
-  return clicked;
+  return false;
 }
 
-async function clickPublish(page) {
+async function clickPublish(page, { onExternalActionBoundary } = {}) {
   await dismissInterferingOverlays(page);
 
   for (let attempt = 0; attempt < 6; attempt += 1) {
     await scrollToBottom(page);
     await page.waitForTimeout(500);
 
-    const clicked = await tryClickPublishButton(page);
+    const clicked = await tryClickPublishButton(page, onExternalActionBoundary);
     if (clicked) {
       console.log(`Publish button clicked on attempt ${attempt + 1}.`);
       return;
@@ -1160,12 +1076,10 @@ async function waitForPublishConfirmation(page, responseTracker) {
   const startedUrl = page.url();
   const tracker = responseTracker || createPublishResponseTracker(page);
   const ownsTracker = !responseTracker;
-  let primaryRetryCount = 0;
+  let secondaryConfirmAttempted = false;
 
   try {
     for (let attempt = 0; attempt < 30; attempt += 1) {
-      await dismissInterferingOverlays(page);
-
       const bodyText = await page
         .locator("body")
         .innerText()
@@ -1200,20 +1114,8 @@ async function waitForPublishConfirmation(page, responseTracker) {
         };
       }
 
-      await trySecondaryPublishConfirm(page);
-
-      if (
-        primaryRetryCount < 2 &&
-        attempt > 0 &&
-        attempt % 5 === 0 &&
-        page.url().includes("/upload")
-      ) {
-        console.log("No publish confirmation yet; retrying the primary TikTok Post button.");
-        const retried = await tryClickPublishButton(page);
-        if (retried) {
-          primaryRetryCount += 1;
-          await page.waitForTimeout(1000);
-        }
+      if (!secondaryConfirmAttempted) {
+        secondaryConfirmAttempted = await trySecondaryPublishConfirm(page);
       }
 
       const urlChanged = page.url() !== startedUrl;
@@ -1350,8 +1252,7 @@ async function uploadVideo({ videoPath, caption, source, accountId }) {
     await disableShortContentCheck(page);
     publishResponseTracker = createPublishResponseTracker(page);
     stage = "post_click";
-    await clickPublish(page);
-    externalActionStarted = true;
+    await clickPublish(page, { onExternalActionBoundary: () => { externalActionStarted = true; } });
     stage = "confirmation";
     const confirmation = await waitForPublishConfirmation(page, publishResponseTracker);
     if (!confirmation.ok) {
@@ -1385,6 +1286,7 @@ async function uploadVideo({ videoPath, caption, source, accountId }) {
       ok: false,
       error: error.message,
       diagnosticCode,
+      phase: stage,
       screenshotPath,
       externalActionStarted,
     };
@@ -1411,5 +1313,6 @@ module.exports = {
     resolveBlockingOverlays,
     selectKnownDialogAction,
     setCaption,
+    waitForPublishConfirmation,
   },
 };

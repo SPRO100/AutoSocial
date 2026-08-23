@@ -63,6 +63,7 @@ function classifyPublishError(rawMessage, externalActionStarted = false, diagnos
   const prefixes = {
     UPLOAD_FAILED: "Video upload failed",
     CAPTION_INPUT_FAILED: "Caption input failed",
+    CAPTION_VERIFICATION_FAILED: "Caption verification failed",
     BLOCKING_MODAL_UNRESOLVED: "Blocking TikTok dialog could not be resolved",
     POST_BUTTON_UNAVAILABLE: "TikTok Post button was unavailable",
     PRE_CLICK_BROWSER_FAILURE: "TikTok browser workflow failed before Post click",
@@ -70,6 +71,20 @@ function classifyPublishError(rawMessage, externalActionStarted = false, diagnos
   const prefix = prefixes[diagnosticCode] ||
     (/set.*video file|video file input|could not.*video/i.test(message) ? "Video upload failed" : "TikTok workflow failed before Post click");
   return { status: "failed", reason: safeDetail ? `${prefix}: ${safeDetail}` : `${prefix}.` };
+}
+
+function buildDiagnostic({ code, phase, message, externalActionStarted, status }) {
+  return {
+    code: code || (externalActionStarted ? "POST_CLICK_UNCONFIRMED" : "UNKNOWN_UI_STATE"),
+    phase: phase || (externalActionStarted ? "confirmation" : "browser"),
+    message,
+    externalActionStarted: Boolean(externalActionStarted),
+    postClick: Boolean(externalActionStarted),
+    // An ambiguous post-click result must always require manual resolution.
+    safeToRetry: status === "failed" && !externalActionStarted,
+    remotePostId: null,
+    remotePostUrl: null,
+  };
 }
 
 // Preconditions only - read-only, never mutates anything, never attaches.
@@ -179,6 +194,13 @@ async function publish(accountId, { videoBuffer, filename, caption } = {}) {
       platform: "tiktok",
       finalStatus: classified.status,
       reason: classified.reason,
+      diagnostic: buildDiagnostic({
+        code: uploadResult.diagnosticCode,
+        phase: uploadResult.phase,
+        message: classified.reason,
+        externalActionStarted: uploadResult.externalActionStarted,
+        status: classified.status,
+      }),
       startedAt,
       finishedAt,
     };
