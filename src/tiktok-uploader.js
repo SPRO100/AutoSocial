@@ -29,31 +29,63 @@ async function setCaption(page, caption) {
     return;
   }
 
-  const candidates = [
-    'div[contenteditable="true"]',
-    'textarea[placeholder*="caption" i]',
-    'textarea',
+  const selectors = [
+    '.caption-editor [role="combobox"][contenteditable="true"]',
+    '.caption-markup [contenteditable="true"]',
+    '.public-DraftEditor-content[contenteditable="true"]',
+    '[role="textbox"][contenteditable="true"][aria-label*="caption" i]',
+    '[role="textbox"][contenteditable="true"][aria-label*="description" i]',
+    '[role="combobox"][contenteditable="true"][aria-label*="caption" i]',
+    '[role="combobox"][contenteditable="true"][aria-label*="description" i]',
+    'textarea[aria-label*="caption" i], textarea[placeholder*="caption" i], textarea[placeholder*="description" i]',
   ];
+  let editorObserved = false;
 
-  for (const selector of candidates) {
-    const target = page.locator(selector).first();
-    const count = await target.count();
-    if (count === 0) {
-      continue;
-    }
+  for (let pass = 0; pass < 3; pass += 1) {
+    await resolveBlockingOverlays(page);
 
-    try {
-      await target.click({ timeout: 8000 });
-      await page.keyboard.press("Control+A");
-      await page.keyboard.press("Delete");
-      await target.type(caption, { delay: 10 });
-      return;
-    } catch {
-      // Try the next candidate selector.
+    for (const selector of selectors) {
+      // Fresh locator after every overlay transition; never retain an
+      // ElementHandle across TikTok's React/DraftJS rerenders.
+      const matches = page.locator(selector);
+      const count = Math.min(await matches.count(), 5);
+      for (let index = 0; index < count; index += 1) {
+        const target = matches.nth(index);
+        if (!(await target.isVisible().catch(() => false))) continue;
+        if (!(await target.isEditable().catch(() => false))) continue;
+        editorObserved = true;
+
+        try {
+          // fill() supports both textarea and contenteditable and emits the
+          // input events DraftJS consumes. Keyboard fallback covers current
+          // Studio builds that wrap DraftJS with custom event handling.
+          await target.fill(caption, { timeout: 4000 });
+        } catch {
+          try {
+            await target.click({ timeout: 3000 });
+            await page.keyboard.press("Control+A");
+            await page.keyboard.press("Delete");
+            await page.keyboard.type(caption, { delay: 10 });
+          } catch {
+            continue;
+          }
+        }
+
+        const actual = await target.evaluate((el) => {
+          if (el instanceof HTMLTextAreaElement || el instanceof HTMLInputElement) return el.value;
+          return el.innerText || el.textContent || "";
+        }).catch(() => "");
+        if (actual.trim() === caption.trim()) {
+          console.log(`Caption editor filled and verified (${caption.length} characters).`);
+          return;
+        }
+      }
     }
+    await page.waitForTimeout(500);
   }
 
-  throw new Error("Could not find caption input field.");
+  if (editorObserved) throw workflowError("CAPTION_INPUT_FAILED", "Caption editor was found but its value could not be set and verified.");
+  throw workflowError("CAPTION_INPUT_FAILED", "Could not find a supported TikTok caption editor.");
 }
 
 function escapeRegExp(value) {
@@ -1307,6 +1339,8 @@ async function uploadVideo({ videoPath, caption, source, accountId }) {
     stage = "upload";
     await setVideoFile(page, absoluteVideoPath);
     await waitForUploadReady(page);
+    stage = "editor_overlays";
+    await resolveBlockingOverlays(page);
     stage = "caption";
     await setCaption(page, caption || config.defaultCaption);
     stage = "editor_overlays";
@@ -1376,5 +1410,6 @@ module.exports = {
     isLikelyPublishCandidateInfo,
     resolveBlockingOverlays,
     selectKnownDialogAction,
+    setCaption,
   },
 };
