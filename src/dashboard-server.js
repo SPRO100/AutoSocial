@@ -53,6 +53,15 @@ const accountDeletion = require("./account-deletion");
 const sessionCheck = require("./session-check");
 const tiktokPublish = require("./tiktok-publish");
 
+// Playwright can surface page/dialog protocol failures as late rejected
+// promises after a job's browser connection is already closing. Keep those
+// failures bounded to the job/browser lifecycle and observable instead of
+// allowing Node's default unhandled-rejection behavior to terminate every
+// account served by this process.
+process.on("unhandledRejection", (reason) => {
+  console.error("Unhandled asynchronous job error (service kept alive):", reason);
+});
+
 // Upload content is a plain-text credentials file read client-side (see
 // web/app.js's use of FileReader) and posted as JSON, not multipart - this
 // avoids adding a file-upload dependency and means the raw bytes never

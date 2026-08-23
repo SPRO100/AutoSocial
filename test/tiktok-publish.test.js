@@ -152,6 +152,17 @@ test("an ambiguous/timed-out confirmation is classified as 'unconfirmed', NEVER 
   assert.equal(reloaded.lastPublishStatus, "unconfirmed");
 });
 
+test("an unexpected browser error after the publish action starts is unconfirmed, never definitely failed", async () => {
+  const { tiktokPublish, accountManager } = await freshTiktokPublish({
+    uploadResult: { ok: false, error: "Protocol error while closing page", externalActionStarted: true },
+  });
+  const account = await seedTiktokAccount(accountManager);
+  const result = await tiktokPublish.publish(account.id, { videoBuffer: FAKE_VIDEO });
+  assert.equal(result.finalStatus, "unconfirmed");
+  const reloaded = await accountManager.getAccountById(account.id);
+  assert.equal(reloaded.lastPublishStatus, "unconfirmed");
+});
+
 test("a click alone (upload never actually confirmed ok:true) never becomes 'published'", async () => {
   const { tiktokPublish, accountManager } = await freshTiktokPublish({
     uploadResult: { ok: false, error: "could not locate the video file input" },

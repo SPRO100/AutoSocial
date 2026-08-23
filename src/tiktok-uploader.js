@@ -1200,6 +1200,7 @@ async function uploadVideo({ videoPath, caption, source, accountId }) {
   const { page } = session;
   let closeHoldMs = 0;
   let publishResponseTracker = null;
+  let externalActionStarted = false;
 
   try {
     await gotoUploadPage(page);
@@ -1212,6 +1213,7 @@ async function uploadVideo({ videoPath, caption, source, accountId }) {
     await disableShortContentCheck(page);
     publishResponseTracker = createPublishResponseTracker(page);
     await clickPublish(page);
+    externalActionStarted = true;
     const confirmation = await waitForPublishConfirmation(page, publishResponseTracker);
     if (!confirmation.ok) {
       throw new Error(`Publish verification failed: ${confirmation.reason}`);
@@ -1238,13 +1240,16 @@ async function uploadVideo({ videoPath, caption, source, accountId }) {
       ok: false,
       error: error.message,
       screenshotPath,
+      externalActionStarted,
     };
   } finally {
     if (publishResponseTracker) {
       publishResponseTracker.dispose();
     }
     await holdBrowserBeforeClose(page, closeHoldMs, "post-finalization");
-    await session.disconnect();
+    await session.disconnect().catch((error) => {
+      console.error(`Browser session disconnect failed: ${error.message}`);
+    });
   }
 }
 

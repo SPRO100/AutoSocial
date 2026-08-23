@@ -25,7 +25,7 @@ function safeMessage(error) {
 // waitForPublishConfirmation) to a safe, human-readable operational
 // message - never the raw internal string, but never a fabricated generic
 // either when a more specific one is known.
-function classifyPublishError(rawMessage) {
+function classifyPublishError(rawMessage, externalActionStarted = false) {
   const message = String(rawMessage || "");
   if (/no reliable publish confirmation observed within timeout/i.test(message)) {
     return { status: "unconfirmed", reason: "Publish confirmation timed out." };
@@ -38,6 +38,9 @@ function classifyPublishError(rawMessage) {
   }
   if (/set.*video file|video file input|could not.*video/i.test(message)) {
     return { status: "failed", reason: "Video upload failed." };
+  }
+  if (externalActionStarted) {
+    return { status: "unconfirmed", reason: "The publish action started but its outcome could not be confirmed." };
   }
   return { status: "failed", reason: "Publish failed." };
 }
@@ -132,7 +135,7 @@ async function publish(accountId, { videoBuffer, filename, caption } = {}) {
       };
     }
 
-    const classified = classifyPublishError(uploadResult.error);
+    const classified = classifyPublishError(uploadResult.error, uploadResult.externalActionStarted);
     await accountManager.setPublishStatus(accountId, {
       status: classified.status,
       reason: classified.reason,
