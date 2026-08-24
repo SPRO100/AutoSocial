@@ -181,7 +181,10 @@ async function getState() {
 
 // Queue directory helpers
 
-const PLATFORMS = ["tiktok", "instagram", "youtube"];
+// Keep the account/profile namespace future-proof for browser-managed
+// identities. A platform being listed here only creates isolated state
+// directories; it does not claim that publishing is implemented.
+const PLATFORMS = ["tiktok", "instagram", "threads", "youtube", "x"];
 const SUBDIRS = ["pending", "posted", "failed"];
 
 function getAccountQueueDirs(accountId) {

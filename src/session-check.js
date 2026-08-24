@@ -31,6 +31,10 @@ const accountLock = require("./account-lock");
 
 const VERIFIERS = {
   tiktok: require("./importers/tiktok-verify").verifyTikTokSession,
+  instagram: require("./importers/instagram-verify").verifyInstagramSession,
+  youtube: require("./importers/youtube-verify").verifyYouTubeSession,
+  threads: require("./importers/threads-verify").verifyThreadsSession,
+  x: require("./importers/x-verify").verifyXSession,
 };
 
 function safeMessage(error) {
@@ -54,7 +58,7 @@ function safeVerifyReason(reason) {
 // wraps this with the per-account lock) and tiktok-publish.js#publish
 // (which already holds that same lock for its own, longer duration and
 // must not try to re-acquire it).
-async function checkSessionUnlocked(accountId) {
+async function checkSessionUnlocked(accountId, requestedPlatform) {
   const account = await accountManager.getAccountById(accountId);
   if (!account) {
     return { ok: false, error: "Account not found." };
@@ -63,7 +67,7 @@ async function checkSessionUnlocked(accountId) {
   if (!profileId) {
     return { ok: false, error: "This account has no linked Persona profile." };
   }
-  const platform = account.importPlatform;
+  const platform = requestedPlatform || account.importPlatform;
   const verify = VERIFIERS[platform];
   if (!verify) {
     return { ok: false, error: `Session verification is not supported for platform "${platform || "unknown"}".` };
@@ -117,12 +121,12 @@ async function checkSessionUnlocked(accountId) {
 // itself could not be performed at all (no account, no linked profile, no
 // verifier for this platform, Persona unreachable, or another check/publish
 // for this same account is already in progress).
-async function checkSession(accountId) {
+async function checkSession(accountId, requestedPlatform) {
   if (!accountLock.tryLock(accountId)) {
     return { ok: false, error: "This account is busy with another session check or publish. Try again shortly." };
   }
   try {
-    return await checkSessionUnlocked(accountId);
+    return await checkSessionUnlocked(accountId, requestedPlatform);
   } finally {
     accountLock.unlock(accountId);
   }
