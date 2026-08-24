@@ -46,7 +46,7 @@ test("incident regression: a front blocking modal is retargeted above a covered 
   await withPage(async (page) => {
     await page.setContent(`
       <main><div id="actions"></div></main>
-      <div role="dialog" id="info" style="position:fixed;z-index:10;right:20px;top:20px;width:260px;height:180px">
+      <div role="dialog" id="info" style="position:fixed;z-index:10;left:300px;top:150px;width:500px;height:280px">
         <h2>New editing features added</h2><button id="got-it">Got it</button>
       </div>
       <div role="dialog" aria-modal="true" id="checks" style="position:fixed;z-index:20;left:300px;top:150px;width:500px;height:280px">
