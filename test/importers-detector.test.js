@@ -5,6 +5,7 @@ const path = require("path");
 
 const { detectFormat, getSupplierById } = require("../src/importers/detector");
 const tiktokPipe7 = require("../src/importers/suppliers/tiktok-pipe7");
+const csv = require("../src/importers/suppliers/csv");
 
 // Real fixture FILE (not just an inline string) matching the confirmed real
 // supplier format: a marketing/informational header (never real account
@@ -145,4 +146,17 @@ test("tiktok-pipe7 captures real-shaped TikTok session cookie names in the cooki
 
 test("tiktok-pipe7's own test() rejects prose/ad text with fewer than 6 pipes, so it never falsely claims an unrelated file", () => {
   assert.equal(tiktokPipe7.test("Contact us | for the best | TikTok accounts | on the market!"), false);
+});
+
+test("generic CSV importer supports all browser platforms and never exposes credential values in preview", () => {
+  const input = "platform,handle,password,project,group\ninstagram,@creator,secret,brand,video\nthreads,@threads-user,,,brand,\nyoutube,@channel,,,brand,\nx,@x-user,,,brand,\n";
+  assert.equal(csv.test(input), true);
+  const parsed = csv.parse(input);
+  assert.equal(parsed.errors.length, 0);
+  assert.deepEqual(parsed.records.map((r) => r.platform), ["instagram", "threads", "youtube", "x"]);
+  assert.equal(parsed.records[0].password, "secret");
+  const normalize = require("../src/importers/normalize");
+  const preview = normalize.toSafePreview(parsed.records[0]);
+  assert.equal(preview.password, undefined);
+  assert.equal(preview.hasPassword, true);
 });

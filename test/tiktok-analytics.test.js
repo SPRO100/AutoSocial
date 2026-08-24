@@ -5,7 +5,7 @@ const { parseMetric, parseStudioDate } = require("../src/tiktok-analytics");
 test("TikTok Studio metrics parse compact values and preserve unavailable values", () => {
   assert.equal(parseMetric("1.2K"), 1200);
   assert.equal(parseMetric("0"), 0);
-  assert.equal(parseMetric("—"), null);
+  assert.equal(parseMetric("N/A"), null);
 });
 
 test("TikTok Studio locale date with narrow no-break space anchors to canonical year", () => {

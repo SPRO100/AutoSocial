@@ -5,8 +5,9 @@
 // routes that call it. Each adapter exports { id, test(text), parse(text) }
 // (see src/importers/suppliers/tiktok-pipe7.js for the contract).
 const tiktokPipe7 = require("./suppliers/tiktok-pipe7");
+const csv = require("./suppliers/csv");
 
-const SUPPLIERS = [tiktokPipe7];
+const SUPPLIERS = [csv, tiktokPipe7];
 
 // Returns the first matching adapter, or null if nothing recognizes the
 // file. Order matters only if two adapters could both match the same text;
