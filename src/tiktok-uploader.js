@@ -205,6 +205,35 @@ async function findCookieBanner(page) {
   return best;
 }
 
+// TikTok can leave an informational dialog mounted behind a newer blocking
+// modal. DOM order/"first visible" is therefore not a safe stacking signal:
+// Playwright will find the button but the click is covered and times out.
+// Select the live topmost dialog using rendered z-index and geometry, then
+// re-query it again immediately before every action.
+async function findTopmostVisibleDialog(page, selector = "[role='dialog'], [aria-modal='true'], [class*='modal' i], [class*='dialog' i]") {
+  const dialogs = page.locator(selector);
+  const count = await dialogs.count();
+  let best = null;
+  let bestScore = null;
+  for (let i = 0; i < count; i += 1) {
+    const candidate = dialogs.nth(i);
+    if (!(await candidate.isVisible().catch(() => false))) continue;
+    const info = await candidate.evaluate((el) => {
+      const style = getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
+      const z = Number.parseInt(style.zIndex, 10);
+      return { z: Number.isFinite(z) ? z : 0, area: rect.width * rect.height, top: rect.top, left: rect.left };
+    }).catch(() => null);
+    if (!info) continue;
+    const score = [info.z, info.area, -info.top, -info.left];
+    if (!bestScore || score.some((value, index) => value > bestScore[index] && score.slice(0, index).every((v, j) => v === bestScore[j]))) {
+      best = candidate;
+      bestScore = score;
+    }
+  }
+  return best;
+}
+
 async function resolveCookieBanner(page, { disappearTimeoutMs = 3000 } = {}) {
   const banner = await findCookieBanner(page);
   if (!banner) return false;
@@ -251,18 +280,7 @@ async function resolveBlockingOverlays(page, { maxPasses = 3, disappearTimeoutMs
     // editor modal. Resolve it first, then re-evaluate the live DOM.
     await resolveCookieBanner(page, { disappearTimeoutMs });
     // Locators, not ElementHandles: every pass re-evaluates the live DOM.
-    const dialogs = page.locator(
-      "[role='dialog'], [aria-modal='true'], [class*='modal' i], [class*='dialog' i]"
-    );
-    const count = await dialogs.count();
-    let visibleDialog = null;
-    for (let i = 0; i < count; i += 1) {
-      const candidate = dialogs.nth(i);
-      if (await candidate.isVisible().catch(() => false)) {
-        visibleDialog = candidate;
-        break;
-      }
-    }
+    const visibleDialog = await findTopmostVisibleDialog(page);
 
     if (!visibleDialog) return { resolved: true, passes: pass };
 
@@ -316,9 +334,18 @@ async function resolveBlockingOverlays(page, { maxPasses = 3, disappearTimeoutMs
       const actionText = normalizeUiText(await action.innerText().catch(() => ""));
       if (actionText !== selectedText || !(await action.isVisible().catch(() => false))) continue;
       if (await action.isDisabled().catch(() => false)) continue;
-      await action.click({ timeout: 3000 });
-      clicked = true;
-      break;
+      try {
+        await action.click({ timeout: 3000 });
+        clicked = true;
+        break;
+      } catch (error) {
+        // A React transition may have replaced/covered the action. Re-read
+        // the dialog before deciding whether it disappeared or must fail
+        // closed; never force-click through a possible blocking layer.
+        const liveAfterFailure = await findTopmostVisibleDialog(page);
+        if (!liveAfterFailure) continue;
+        throw workflowError("BLOCKING_MODAL_UNRESOLVED", `TikTok dialog action "${selectedText}" was not safely clickable: ${error instanceof Error ? error.message : String(error)}`);
+      }
     }
 
     if (!clicked) {

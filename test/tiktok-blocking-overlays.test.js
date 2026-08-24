@@ -42,6 +42,30 @@ test("incident regression: automatic content checks dialog is safely cancelled, 
   });
 });
 
+test("incident regression: a front blocking modal is retargeted above a covered informational dialog", async () => {
+  await withPage(async (page) => {
+    await page.setContent(`
+      <main><div id="actions"></div></main>
+      <div role="dialog" id="info" style="position:fixed;z-index:10;right:20px;top:20px;width:260px;height:180px">
+        <h2>New editing features added</h2><button id="got-it">Got it</button>
+      </div>
+      <div role="dialog" aria-modal="true" id="checks" style="position:fixed;z-index:20;left:300px;top:150px;width:500px;height:280px">
+        <h2>Turn on automatic content checks?</h2><p>Music copyright check</p><p>Content check lite</p>
+        <button id="cancel">Cancel</button><button>Turn on</button>
+      </div>
+      <script>
+        window.clicked = [];
+        document.querySelector('#got-it').onclick = () => window.clicked.push('got-it');
+        document.querySelector('#cancel').onclick = () => { window.clicked.push('cancel'); document.querySelector('#checks').remove(); document.querySelector('#info').remove(); document.querySelector('#actions').innerHTML = '<button id="post">Post</button>'; };
+      </script>
+    `);
+    const result = await resolveBlockingOverlays(page);
+    assert.equal(result.resolved, true);
+    assert.deepEqual(await page.evaluate(() => window.clicked), ['cancel']);
+    assert.equal(await page.locator('#post').isVisible(), true);
+  });
+});
+
 test("cookie consent is declined safely before the content-check modal and both transitions re-evaluate the DOM", async () => {
   await withPage(async (page) => {
     await page.setContent(`
