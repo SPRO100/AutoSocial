@@ -201,11 +201,12 @@ async function ensureCreateFlowInput(page) {
   return input;
 }
 
-async function setVideoFile(page, videoPath) {
+async function setMediaFiles(page, mediaPaths) {
+  const paths = Array.isArray(mediaPaths) ? mediaPaths : [mediaPaths];
   let input = await ensureCreateFlowInput(page);
   if ((await input.count()) > 0) {
     await input.waitFor({ state: "attached", timeout: 120000 });
-    await input.setInputFiles(videoPath);
+    await input.setInputFiles(paths);
     return;
   }
 
@@ -229,14 +230,14 @@ async function setVideoFile(page, videoPath) {
 
   const chooser = await chooserPromise;
   if (chooser) {
-    await chooser.setFiles(videoPath);
+    await chooser.setFiles(paths);
     return;
   }
 
   // One last attempt to locate input after opening dialogs.
   input = page.locator('input[type="file"]').first();
   await input.waitFor({ state: "attached", timeout: 120000 });
-  await input.setInputFiles(videoPath);
+  await input.setInputFiles(paths);
 }
 
 async function clickNextButtons(page) {
@@ -318,15 +319,15 @@ async function waitForPostConfirmation(page, startedUrl) {
   return { ok: false, reason: "No reliable Instagram post confirmation within timeout." };
 }
 
-async function uploadVideo({ videoPath, caption, accountId }) {
-  const absoluteVideoPath = path.resolve(videoPath);
+async function uploadMedia({ mediaPaths, caption, accountId, publicationType = "video" }) {
+  const absoluteMediaPaths = (Array.isArray(mediaPaths) ? mediaPaths : [mediaPaths]).map((file) => path.resolve(file));
   const session = await openBrowserSession(accountId);
   const { page } = session;
   let closeHoldMs = 0;
 
   try {
     await gotoUploadPage(page);
-    await setVideoFile(page, absoluteVideoPath);
+    await setMediaFiles(page, absoluteMediaPaths);
     await page.waitForTimeout(Math.max(config.postDelayMs, 5000));
     await clickNextButtons(page);
     await setCaption(page, caption || config.defaultCaption);
@@ -350,7 +351,7 @@ async function uploadVideo({ videoPath, caption, accountId }) {
 
     // Hold the browser open so background processing finishes
     closeHoldMs = Math.max(config.postPublishHoldMs || 15000, 15000);
-    return { ok: true };
+    return { ok: true, publicationType };
   } catch (error) {
     const screenshotPath = path.resolve(
       config.projectRoot,
@@ -373,10 +374,14 @@ async function uploadVideo({ videoPath, caption, accountId }) {
   }
 }
 
+async function uploadVideo(input) {
+  return uploadMedia({ ...input, mediaPaths: input.videoPath, publicationType: "video" });
+}
+
 module.exports = {
   uploadVideo,
+  uploadMedia,
   startLoginSession,
   getLoginSessionStatus,
   closeLoginSession,
 };
-

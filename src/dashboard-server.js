@@ -55,6 +55,7 @@ const accountLock = require("./account-lock");
 const tiktokPublish = require("./tiktok-publish");
 const instagramUploader = require("./instagram-uploader");
 const youtubeUploader = require("./youtube-uploader");
+const { getBrowserAdapter } = require("./browser-platform-adapters");
 
 // Playwright can surface page/dialog protocol failures as late rejected
 // promises after a job's browser connection is already closing. Keep those
@@ -435,11 +436,11 @@ async function createServer() {
   app.get("/api/platform-capabilities", (_req, res) => {
     res.json({ ok: true, capabilities: [
       { platform: "tiktok", provider: "autosocial", types: ["video"], status: "READY" },
-      { platform: "instagram", provider: "autosocial", types: ["reel", "post_video"], status: "READY" },
-      { platform: "instagram", provider: "autosocial", types: ["story", "post_image", "carousel"], status: "UNSUPPORTED_BROWSER_FLOW" },
-      { platform: "threads", provider: "autosocial", types: [], status: "UNSUPPORTED_BROWSER_FLOW" },
+      { platform: "instagram", provider: "autosocial", types: ["reel", "post_video", "post_image"], status: "READY" },
+      { platform: "instagram", provider: "autosocial", types: ["story_image", "story_video", "carousel"], status: "UNSUPPORTED_BROWSER_FLOW" },
+      { platform: "threads", provider: "autosocial", types: ["text", "image", "video"], status: "IMPLEMENTED_AWAITING_REAL_ACCEPTANCE" },
       { platform: "youtube", provider: "autosocial", types: ["short", "video"], status: "READY" },
-      { platform: "x", provider: "autosocial", types: [], status: "UNSUPPORTED_BROWSER_FLOW" },
+      { platform: "x", provider: "autosocial", types: ["text", "image", "video", "multi_media"], status: "IMPLEMENTED_AWAITING_REAL_ACCEPTANCE" },
     ] });
   });
 
@@ -478,11 +479,11 @@ async function createServer() {
     const accountId = req.query?.accountId;
     const publicationType = String(req.query?.publicationType || "video").toLowerCase();
     const caption = typeof req.query?.caption === "string" ? req.query.caption : "";
-    if (!accountId || !Buffer.isBuffer(req.body) || !req.body.length) return res.status(400).json({ ok: false, error: "Missing accountId or media." });
-    if (platform === "instagram" && !["reel", "post_video", "video"].includes(publicationType)) {
+    if (!accountId || (!Buffer.isBuffer(req.body) && !["threads", "x"].includes(platform))) return res.status(400).json({ ok: false, error: "Missing accountId or media." });
+    if (platform === "instagram" && !["reel", "post_video", "post_image", "video"].includes(publicationType)) {
       return res.status(501).json({ ok: false, finalStatus: "failed", code: "UNSUPPORTED_BROWSER_FLOW", phase: "capability", safeToRetry: true, externalActionStarted: false, postClick: false });
     }
-    if (platform !== "instagram" && platform !== "youtube") {
+    if (platform !== "instagram" && platform !== "youtube" && !getBrowserAdapter(platform)) {
       return res.status(501).json({ ok: false, finalStatus: "failed", code: "UNSUPPORTED_BROWSER_FLOW", phase: "capability", safeToRetry: true, externalActionStarted: false, postClick: false });
     }
     if (!accountLock.tryLock(accountId)) {
@@ -491,11 +492,16 @@ async function createServer() {
     const filename = typeof req.query?.filename === "string" ? req.query.filename : `${platform}-upload.mp4`;
     const tempPath = path.join(config.projectRoot, "queue", `api-${Date.now()}-${filename.replace(/[^a-zA-Z0-9._-]/g, "_")}`);
     try {
-      await fs.mkdir(path.dirname(tempPath), { recursive: true });
-      await fs.writeFile(tempPath, req.body);
+      const hasMedia = Buffer.isBuffer(req.body) && req.body.length > 0;
+      if (hasMedia) {
+        await fs.mkdir(path.dirname(tempPath), { recursive: true });
+        await fs.writeFile(tempPath, req.body);
+      }
       const result = platform === "instagram"
-        ? await instagramUploader.uploadVideo({ videoPath: tempPath, caption, accountId })
-        : await youtubeUploader.uploadVideo({ videoPath: tempPath, caption, accountId });
+        ? await instagramUploader.uploadMedia({ mediaPaths: tempPath, caption, accountId, publicationType })
+        : platform === "youtube"
+          ? await youtubeUploader.uploadVideo({ videoPath: tempPath, caption, accountId })
+          : await getBrowserAdapter(platform).publish({ accountId, text: caption, mediaPaths: hasMedia ? [tempPath] : [], publicationType: publicationType.toUpperCase() });
       if (!result.ok) return res.status(400).json({ ok: false, finalStatus: "failed", code: "BROWSER_PUBLISH_FAILED", phase: "browser", error: result.error, diagnosticArtifact: result.screenshotPath, safeToRetry: true, externalActionStarted: false, postClick: false });
       return res.json({ ok: true, finalStatus: "published", platform, publicationType, accountId, externalActionStarted: true, postClick: true, safeToRetry: false, remotePostId: null, remotePostUrl: null });
     } catch (error) {
