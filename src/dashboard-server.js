@@ -53,6 +53,7 @@ const accountDeletion = require("./account-deletion");
 const sessionCheck = require("./session-check");
 const accountLock = require("./account-lock");
 const tiktokPublish = require("./tiktok-publish");
+const tiktokAnalytics = require("./tiktok-analytics");
 const instagramUploader = require("./instagram-uploader");
 const youtubeUploader = require("./youtube-uploader");
 const { getBrowserAdapter } = require("./browser-platform-adapters");
@@ -442,6 +443,23 @@ async function createServer() {
       { platform: "youtube", provider: "autosocial", types: ["short", "video"], status: "READY" },
       { platform: "x", provider: "autosocial", types: ["text", "image", "video", "multi_media"], status: "IMPLEMENTED_AWAITING_REAL_ACCEPTANCE" },
     ] });
+  });
+
+  // Read-only TikTok Studio insights for an already-published post. The
+  // caller supplies canonical attribution anchors; the adapter never uses
+  // destructive controls and returns UNRESOLVED when the browser has zero or
+  // multiple matches.
+  app.post("/api/analytics/tiktok/publication", async (req, res) => {
+    try {
+      const result = await tiktokAnalytics.collectTikTokPublicationAnalytics({
+        accountId: req.body?.accountId,
+        caption: req.body?.caption,
+        publishedAt: req.body?.publishedAt,
+      });
+      res.status(200).json({ ok: true, ...result });
+    } catch (error) {
+      res.status(200).json({ ok: true, state: "FAILED", reason: error.message });
+    }
   });
 
   // First real single-video TikTok publish (see src/tiktok-publish.js).
