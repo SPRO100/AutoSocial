@@ -51,6 +51,7 @@ const { buildPreview, importBatch } = require("./importers/pipeline");
 const uploadStore = require("./importers/upload-store");
 const accountDeletion = require("./account-deletion");
 const sessionCheck = require("./session-check");
+const accountLock = require("./account-lock");
 const tiktokPublish = require("./tiktok-publish");
 const instagramUploader = require("./instagram-uploader");
 const youtubeUploader = require("./youtube-uploader");
@@ -484,6 +485,9 @@ async function createServer() {
     if (platform !== "instagram" && platform !== "youtube") {
       return res.status(501).json({ ok: false, finalStatus: "failed", code: "UNSUPPORTED_BROWSER_FLOW", phase: "capability", safeToRetry: true, externalActionStarted: false, postClick: false });
     }
+    if (!accountLock.tryLock(accountId)) {
+      return res.status(409).json({ ok: false, finalStatus: "failed", code: "ACCOUNT_BUSY", phase: "concurrency", safeToRetry: true, externalActionStarted: false, postClick: false });
+    }
     const filename = typeof req.query?.filename === "string" ? req.query.filename : `${platform}-upload.mp4`;
     const tempPath = path.join(config.projectRoot, "queue", `api-${Date.now()}-${filename.replace(/[^a-zA-Z0-9._-]/g, "_")}`);
     try {
@@ -497,6 +501,7 @@ async function createServer() {
     } catch (error) {
       return res.status(500).json({ ok: false, finalStatus: "unconfirmed", code: "BROWSER_PUBLISH_UNCONFIRMED", phase: "browser", error: error.message, safeToRetry: false, externalActionStarted: true, postClick: true });
     } finally {
+      accountLock.unlock(accountId);
       await fs.rm(tempPath, { force: true }).catch(() => {});
     }
   });
