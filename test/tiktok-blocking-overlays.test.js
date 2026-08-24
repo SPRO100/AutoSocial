@@ -66,6 +66,29 @@ test("incident regression: a front blocking modal is retargeted above a covered 
   });
 });
 
+test("incident regression: phone preview hint is acknowledged by its scoped Got it action", async () => {
+  await withPage(async (page) => {
+    await page.setContent(`
+      <main><div id="actions"></div></main>
+      <div role="dialog" aria-modal="true" id="phone-hint">
+        <h2>Preview your video on your phone</h2>
+        <p>Scan the QR code to preview your video on your phone before posting.</p>
+        <button id="got-it">Got it</button><button id="post">Post</button>
+      </div>
+      <script>
+        window.clicked = [];
+        document.querySelector('#got-it').onclick = () => { window.clicked.push('got-it'); document.querySelector('#phone-hint').remove(); document.querySelector('#actions').innerHTML = '<button id="post-ready">Post</button>'; };
+        document.querySelector('#post').onclick = () => window.clicked.push('post');
+      </script>
+    `);
+    const result = await resolveBlockingOverlays(page);
+    assert.equal(result.resolved, true);
+    assert.deepEqual(await page.evaluate(() => window.clicked), ['got-it']);
+    assert.equal(await page.locator('#phone-hint').count(), 0);
+    assert.equal(await page.locator('#post-ready').isVisible(), true);
+  });
+});
+
 test("cookie consent is declined safely before the content-check modal and both transitions re-evaluate the DOM", async () => {
   await withPage(async (page) => {
     await page.setContent(`

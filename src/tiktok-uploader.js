@@ -162,6 +162,13 @@ function selectKnownDialogAction(dialogText, buttonTexts) {
     return find("got it", "close", "not now", "skip");
   }
 
+  // TikTok Studio's upload editor also shows a non-destructive phone-preview
+  // hint. Keep the match semantic and dialog-scoped; only acknowledge the
+  // exact safe label and never select a generic first button.
+  if (/preview your video on your phone|preview your video on mobile|watch it on your phone/.test(text)) {
+    return find("got it", "close", "dismiss");
+  }
+
   return null;
 }
 
