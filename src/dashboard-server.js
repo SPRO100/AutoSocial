@@ -649,6 +649,13 @@ async function createServer() {
         for (const template of ordered) {
           const applied = manualMapping.parse(content, hintedPlatform, template);
           if (applied.records.length) { supplier = { id: `template-${template.id}`, parse: () => applied }; templateName = template.name; break; }
+          // A user-selected template is still useful even when this upload
+          // needs review (for example a changed header or record layout). Do
+          // not discard the saved structural mapping or fall through to the
+          // old universal detector; return an actionable review state.
+          if (req.body?.templateId === template.id) {
+            return res.json({ ok: true, requiresMapping: true, code: "PARSE_REVIEW_REQUIRED", platform: hintedPlatform, templateId: template.id, templateName: template.name, mapping: { ...manualMapping.suggest(content, hintedPlatform), delimiter: template.delimiter, fields: template.fields, recordMode: template.recordMode || "AUTO" }, error: `Saved template "${template.name}" needs review for this file.` });
+          }
         }
       }
       if (!supplier) {

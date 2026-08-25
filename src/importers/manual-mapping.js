@@ -21,15 +21,18 @@ function suggest(content, platform) {
 function parse(content, platform, mapping) {
   const delimiter = mapping.delimiter === "TAB" ? "\t" : mapping.delimiter;
   const fields = mapping.fields || {}; const used = Object.entries(fields).filter(([, index]) => index !== "ignore" && index !== null && index !== undefined).map(([, index]) => Number(index));
-  if (!fields.username && !fields.login && fields.email) fields.username = fields.email;
-  const loginIndex = fields.username ?? fields.login ?? fields.email;
-  const passwordIndex = fields.password;
+  const fieldIndex = (field) => Number.isInteger(Number(fields[field])) && Number(fields[field]) >= 0 ? Number(fields[field]) : undefined;
+  if (fieldIndex("username") === undefined && fieldIndex("login") === undefined && fieldIndex("email") !== undefined) fields.username = fields.email;
+  const loginIndex = fieldIndex("username") ?? fieldIndex("login") ?? fieldIndex("email");
+  const passwordIndex = fieldIndex("password");
   if (!Number.isInteger(Number(loginIndex)) || !Number.isInteger(Number(passwordIndex)) || used.filter((i) => i >= 0).length !== new Set(used.filter((i) => i >= 0)).size) return { records: [], errors: [{ reason: "login and password mappings are required and fields cannot be assigned twice", code: "PARSE_REVIEW_REQUIRED" }] };
   const records = []; const errors = []; let ignoredMetadata = 0;
   const pushRecord = (values) => {
+    const requiredIndexes = [loginIndex, passwordIndex, fieldIndex("twoFactorSecret"), fieldIndex("cookie"), fieldIndex("cookies")].filter((index) => index !== undefined);
+    if (requiredIndexes.some((index) => index >= values.length)) return false;
     const login = values[Number(loginIndex)] || ""; const password = values[Number(passwordIndex)] || "";
     if (!validLogin(login) || !password) return false;
-    records.push(createRecord({ platform, username: login, email: fields.email !== undefined ? login : undefined, password, twoFactorSecret: fields.twoFactorSecret !== undefined ? values[Number(fields.twoFactorSecret)] : undefined, cookies: fields.cookie !== undefined ? values[Number(fields.cookie)] : undefined, recoveryEmail: fields.recoveryEmail !== undefined ? values[Number(fields.recoveryEmail)] : undefined, recoveryPassword: fields.recoveryPassword !== undefined ? values[Number(fields.recoveryPassword)] : undefined, externalId: fields.channelUrl !== undefined ? values[Number(fields.channelUrl)] : undefined, userAgent: fields.userAgent !== undefined ? values[Number(fields.userAgent)] : undefined, parserStatus: "READY", parserConfidence: "MANUAL" }));
+    records.push(createRecord({ platform, username: login, email: fieldIndex("email") !== undefined ? values[fieldIndex("email")] : undefined, password, twoFactorSecret: fieldIndex("twoFactorSecret") !== undefined ? values[fieldIndex("twoFactorSecret")] : undefined, cookies: fieldIndex("cookie") !== undefined ? values[fieldIndex("cookie")] : (fieldIndex("cookies") !== undefined ? values[fieldIndex("cookies")] : undefined), recoveryEmail: fieldIndex("recoveryEmail") !== undefined ? values[fieldIndex("recoveryEmail")] : undefined, recoveryPassword: fieldIndex("recoveryPassword") !== undefined ? values[fieldIndex("recoveryPassword")] : undefined, externalId: fieldIndex("channelUrl") !== undefined ? values[fieldIndex("channelUrl")] : undefined, userAgent: fieldIndex("userAgent") !== undefined ? values[fieldIndex("userAgent")] : undefined, parserStatus: "READY", parserConfidence: "MANUAL" }));
     return true;
   };
   // Some suppliers export one credential per labelled block rather than one
@@ -43,18 +46,21 @@ function parse(content, platform, mapping) {
     if (!matched && /^(?:username|login|email|password|2fa|totp|cookie|cookies)\s*[:=]/i.test(line)) block.invalid = true;
   }
   if (block.username) blocks.push(block);
-  if (blocks.length >= 2) {
+  // A saved ROW template is authoritative. Do not let a colon in a supplier
+  // row accidentally reinterpret it as labelled metadata.
+  if (mapping.recordMode !== "ROW" && blocks.length >= 2) {
     for (const item of blocks) {
       if (!validLogin(item.username) || !item.password) continue;
       const values = []; values[Number(loginIndex)] = item.username; values[Number(passwordIndex)] = item.password;
-      if (fields.twoFactorSecret !== undefined) values[Number(fields.twoFactorSecret)] = item.twoFactorSecret;
-      if (fields.cookie !== undefined) values[Number(fields.cookie)] = item.cookie;
+      if (fieldIndex("twoFactorSecret") !== undefined) values[fieldIndex("twoFactorSecret")] = item.twoFactorSecret;
+      if (fieldIndex("cookie") !== undefined) values[fieldIndex("cookie")] = item.cookie;
       pushRecord(values);
     }
     return { records, errors, ignoredMetadata: Math.max(0, blockLines.length - blocks.length * 3) };
   }
   for (const { line, lineNumber } of lines(content)) {
-    const values = splitRow(line, delimiter, fields.cookie === undefined ? undefined : Number(fields.cookie));
+    const cookieIndex = fieldIndex("cookie") ?? fieldIndex("cookies");
+    const values = splitRow(line, delimiter, cookieIndex);
     if (!pushRecord(values)) ignoredMetadata += 1;
   }
   return { records, errors, ignoredMetadata };
