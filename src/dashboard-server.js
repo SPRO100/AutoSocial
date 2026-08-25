@@ -47,6 +47,8 @@ const {
 } = require("./persona-browser");
 const { computeAccountPersona, indexProfilesById } = require("./persona-overview");
 const { detectFormat } = require("./importers/detector");
+const manualMapping = require("./importers/manual-mapping");
+const templateStore = require("./importers/template-store");
 const { buildPreview, importBatch } = require("./importers/pipeline");
 const uploadStore = require("./importers/upload-store");
 const accountDeletion = require("./account-deletion");
@@ -638,14 +640,18 @@ async function createServer() {
       if (Buffer.byteLength(content, "utf8") > MAX_IMPORT_FILE_BYTES) {
         return res.status(400).json({ ok: false, error: "File is too large." });
       }
-      const supplier = detectFormat(content, { platform: typeof req.body?.platform === "string" ? req.body.platform : undefined });
+      const hintedPlatform = typeof req.body?.platform === "string" ? req.body.platform.toLowerCase() : undefined;
+      let supplier = detectFormat(content, { platform: hintedPlatform });
+      let templateName = null;
+      if (!supplier && hintedPlatform) {
+        for (const template of await templateStore.list(hintedPlatform)) {
+          const applied = manualMapping.parse(content, hintedPlatform, template);
+          if (applied.records.length) { supplier = { id: `template-${template.id}`, parse: () => applied }; templateName = template.name; break; }
+        }
+      }
       if (!supplier) {
         if (typeof req.body?.platform === "string" && req.body.platform.trim()) {
-          return res.status(400).json({
-            ok: false,
-            code: "PARSE_REVIEW_REQUIRED",
-            error: `Platform is ${req.body.platform}, but no supported supplier schema was proven. Review the field mapping before import.`,
-          });
+          return res.json({ ok: true, requiresMapping: true, code: "PARSE_REVIEW_REQUIRED", platform: req.body.platform, mapping: manualMapping.suggest(content, req.body.platform), error: `Format needs review: ${req.body.platform} was detected, but account fields need confirmation.` });
         }
         return res.status(400).json({
           ok: false,
@@ -661,7 +667,7 @@ async function createServer() {
         });
       }
       const preview = await buildPreview(records);
-      const importId = uploadStore.put(records, { format: supplier.id });
+      const importId = uploadStore.put(records, { format: supplier.id, template: templateName });
       res.json({
         ok: true,
         importId,
@@ -669,12 +675,35 @@ async function createServer() {
         total: records.length,
         ignoredMetadata,
         classifications,
+        templateName,
         parseErrors: errors,
         preview,
       });
     } catch (error) {
       res.status(400).json({ ok: false, error: error.message });
     }
+  });
+
+  app.post("/api/import/mapping/preview", async (req, res) => {
+    try {
+      const content = req.body?.content; const platform = String(req.body?.platform || "").toLowerCase(); const mapping = req.body?.mapping;
+      if (typeof content !== "string" || !content.trim() || !platform || !mapping) return res.status(400).json({ ok: false, error: "Content, platform and mapping are required." });
+      const parsed = manualMapping.parse(content, platform, mapping);
+      if (!parsed.records.length) return res.status(400).json({ ok: false, code: "PARSE_REVIEW_REQUIRED", error: parsed.errors[0]?.reason || "Mapping produced no valid account records.", mapping: manualMapping.suggest(content, platform) });
+      const preview = await buildPreview(parsed.records); const importId = uploadStore.put(parsed.records, { format: `manual-${platform}`, template: mapping.templateName || null });
+      res.json({ ok: true, requiresMapping: false, importId, format: `manual-${platform}`, total: parsed.records.length, parseErrors: parsed.errors, preview });
+    } catch (error) { res.status(400).json({ ok: false, error: error.message }); }
+  });
+
+  app.post("/api/import/templates", async (req, res) => {
+    try { res.json({ ok: true, templates: await templateStore.list(typeof req.body?.platform === "string" ? req.body.platform : undefined) }); } catch (error) { res.status(400).json({ ok: false, error: error.message }); }
+  });
+  app.post("/api/import/templates/save", async (req, res) => {
+    try {
+      const template = req.body?.template;
+      if (!template?.platform || !template?.delimiter || !template?.fields) return res.status(400).json({ ok: false, error: "Structural template fields are required." });
+      res.json({ ok: true, template: await templateStore.save(template) });
+    } catch (error) { res.status(400).json({ ok: false, error: error.message }); }
   });
 
   app.post("/api/import/confirm", async (req, res) => {
