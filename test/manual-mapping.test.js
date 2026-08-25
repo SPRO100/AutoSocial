@@ -31,7 +31,7 @@ test("manual mapping parses two labelled Instagram credential blocks and ignores
 
 test("saved supplier template preserves structural fields and restores a two-account row mapping", () => {
   const saved = normalizeTemplate({
-    id: "supplier-instagram-v1", name: "8090729 order · insta", platform: "Instagram", delimiter: ":",
+    id: "supplier-instagram-v1", name: "supplier-instagram-v1", platform: "Instagram", delimiter: ":",
     fields: { username: 0, password: 1, twoFactorSecret: 2, cookie: "ignore", email: "ignore" }, recordMode: "ROW",
     normalization: { trim: true },
   });
