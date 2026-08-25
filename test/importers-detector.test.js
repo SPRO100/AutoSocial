@@ -77,6 +77,37 @@ test("Instagram colon importer recognizes explicit TOTP plus cookie and safe pre
   assert.equal(JSON.stringify(safe).includes("secret"), false);
 });
 
+test("Instagram colon importer ignores supplier advertising/instructions and preserves colon-containing cookies", () => {
+  const input = [
+    "Order: Instagram accounts below",
+    "IMPORTANT! Use a proxy or https://proxy.example",
+    "Mircard instructions: read before use",
+    "Your order below",
+    "alice_user:SafePass123:sessionid=abc:def; csrftoken=ghi",
+    "bob_user:SafePass456",
+    "Received? Contact: support@example.test",
+    "",
+  ].join("\r\n");
+  const supplier = getSupplierById("instagram-colon-v1");
+  assert.equal(supplier.test(input), true);
+  const result = supplier.parse(input);
+  assert.equal(result.records.length, 2);
+  assert.equal(result.ignoredMetadata, 5);
+  assert.equal(result.errors.length, 0);
+  assert.equal(result.records[0].username, "alice_user");
+  assert.equal(result.records[0].cookies, "sessionid=abc:def; csrftoken=ghi");
+  assert.equal(result.records[1].username, "bob_user");
+});
+
+test("Instagram colon importer does not claim metadata-only files", () => {
+  const supplier = getSupplierById("instagram-colon-v1");
+  const input = "Order: 12 accounts\nIMPORTANT: https://example.test\nYour order below\n";
+  assert.equal(supplier.test(input), false);
+  const result = supplier.parse(input);
+  assert.equal(result.records.length, 0);
+  assert.equal(result.ignoredMetadata, 3);
+});
+
 // --- tiktok-pipe7 adapter itself --------------------------------------
 
 test("tiktok-pipe7 parses a full line into every normalized field, including authToken", () => {

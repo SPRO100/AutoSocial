@@ -645,7 +645,7 @@ async function createServer() {
           error: "This file's format was not recognized by any supported supplier adapter.",
         });
       }
-      const { records, errors } = supplier.parse(content);
+      const { records, errors, ignoredMetadata = 0, classifications = null } = supplier.parse(content);
       if (!records.length) {
         return res.status(400).json({
           ok: false,
@@ -660,6 +660,8 @@ async function createServer() {
         importId,
         format: supplier.id,
         total: records.length,
+        ignoredMetadata,
+        classifications,
         parseErrors: errors,
         preview,
       });
