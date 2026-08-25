@@ -643,10 +643,12 @@ async function createServer() {
       const hintedPlatform = typeof req.body?.platform === "string" ? req.body.platform.toLowerCase() : undefined;
       let supplier = detectFormat(content, { platform: hintedPlatform });
       let templateName = null;
-      if (!supplier && hintedPlatform) {
-        for (const template of await templateStore.list(hintedPlatform)) {
+      if (hintedPlatform) {
+        const templates = await templateStore.list(hintedPlatform);
+        const ordered = req.body?.templateId ? [...templates.filter((x) => x.id === req.body.templateId), ...templates.filter((x) => x.id !== req.body.templateId)] : templates;
+        for (const template of ordered) {
           const applied = manualMapping.parse(content, hintedPlatform, template);
-          if (applied.records.length) { supplier = { id: `template-${template.id}`, parse: () => applied }; templateName = template.name; break; }
+          if (applied.records.length && (!supplier || req.body?.templateId === template.id)) { supplier = { id: `template-${template.id}`, parse: () => applied }; templateName = template.name; break; }
         }
       }
       if (!supplier) {
@@ -698,6 +700,8 @@ async function createServer() {
   app.post("/api/import/templates", async (req, res) => {
     try { res.json({ ok: true, templates: await templateStore.list(typeof req.body?.platform === "string" ? req.body.platform : undefined) }); } catch (error) { res.status(400).json({ ok: false, error: error.message }); }
   });
+  app.get("/api/import/templates", async (req, res) => { try { res.json({ ok: true, templates: await templateStore.list(typeof req.query?.platform === "string" ? req.query.platform : undefined) }); } catch (error) { res.status(400).json({ ok: false, error: error.message }); } });
+  app.delete("/api/import/templates/:id", async (req, res) => { try { res.json({ ok: true, removed: await templateStore.remove(req.params.id) }); } catch (error) { res.status(400).json({ ok: false, error: error.message }); } });
   app.post("/api/import/templates/save", async (req, res) => {
     try {
       const template = req.body?.template;
