@@ -648,7 +648,7 @@ async function createServer() {
         const ordered = req.body?.templateId ? [...templates.filter((x) => x.id === req.body.templateId), ...templates.filter((x) => x.id !== req.body.templateId)] : templates;
         for (const template of ordered) {
           const applied = manualMapping.parse(content, hintedPlatform, template);
-          if (applied.records.length && (!supplier || req.body?.templateId === template.id)) { supplier = { id: `template-${template.id}`, parse: () => applied }; templateName = template.name; break; }
+          if (applied.records.length) { supplier = { id: `template-${template.id}`, parse: () => applied }; templateName = template.name; break; }
         }
       }
       if (!supplier) {
