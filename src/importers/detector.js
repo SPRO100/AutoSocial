@@ -6,8 +6,9 @@
 // (see src/importers/suppliers/tiktok-pipe7.js for the contract).
 const tiktokPipe7 = require("./suppliers/tiktok-pipe7");
 const csv = require("./suppliers/csv");
+const instagramColon = require("./suppliers/instagram-colon");
 
-const SUPPLIERS = [csv, tiktokPipe7];
+const SUPPLIERS = [csv, tiktokPipe7, instagramColon];
 
 // Returns the first matching adapter, or null if nothing recognizes the
 // file. Order matters only if two adapters could both match the same text;

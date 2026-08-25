@@ -18,14 +18,14 @@ function splitCsvLine(line) {
   return fields;
 }
 
-function normalizeHeader(value) { return String(value || "").toLowerCase().replace(/[\s_-]+/g, ""); }
+function normalizeHeader(value) { return String(value || "").toLowerCase().replace(/[\s_.-]+/g, ""); }
 function splitLines(text) { return String(text || "").split(/\r?\n/).map((line, index) => ({ line: line.trim(), lineNumber: index + 1 })).filter(({ line }) => line && !line.startsWith("#")); }
 
 function test(text) {
   const lines = splitLines(text); if (!lines.length) return false;
   const header = splitCsvLine(lines[0].line); if (!header) return false;
   const keys = new Set(header.map(normalizeHeader));
-  return keys.has("platform") && (keys.has("username") || keys.has("handle"));
+  return (keys.has("platform") || keys.has("provider")) && (keys.has("username") || keys.has("login") || keys.has("email") || keys.has("handle"));
 }
 
 function parse(text) {
@@ -36,9 +36,10 @@ function parse(text) {
   for (const { line, lineNumber } of lines.slice(1)) {
     const values = splitCsvLine(line);
     if (!values) { errors.push({ line: lineNumber, reason: "malformed CSV quoting" }); continue; }
-    const platform = get(values, "platform").toLowerCase(); const username = get(values, "username", "handle");
+    const platform = get(values, "platform", "provider").toLowerCase(); const username = get(values, "username", "login", "email", "handle");
     if (!platform || !username) { errors.push({ line: lineNumber, reason: "platform and username are required" }); continue; }
-    records.push(createRecord({ platform, username, password: get(values, "password"), email: get(values, "email"), emailPassword: get(values, "emailPassword", "email_password"), authToken: get(values, "authToken", "auth_token"), externalId: get(values, "externalId", "external_id"), cookies: get(values, "cookies") }));
+    const totp = get(values, "2fa", "totp", "otp_secret", "otpsecret", "totpsecret");
+    records.push(createRecord({ platform, username, password: get(values, "password"), email: get(values, "email"), emailPassword: get(values, "emailPassword", "email_password"), authToken: get(values, "authToken", "auth_token"), externalId: get(values, "externalId", "external_id"), cookies: get(values, "cookies", "cookie"), twoFactorSecret: totp, userAgent: get(values, "user_agent", "useragent"), proxy: get(values, "proxy"), recoveryEmail: get(values, "recovery_email", "recoveryemail"), recoveryPassword: get(values, "recovery_password", "recoverypassword"), phone: get(values, "phone") }));
   }
   return { records, errors };
 }

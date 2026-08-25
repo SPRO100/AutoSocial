@@ -19,6 +19,7 @@ const accountManager = require("../account-manager");
 const persona = require("../persona-browser");
 const { toSafePreview, duplicateKey } = require("./normalize");
 const { toPersonaCookiePayload } = require("./cookie-adapter");
+const credentialVault = require("../security/credential-vault");
 
 const DEFAULT_CONCURRENCY = 2;
 // A hard ceiling regardless of what a caller requests - importBatch is
@@ -44,6 +45,7 @@ const activeImportKeys = new Set();
 
 const VERIFIERS = {
   tiktok: require("./tiktok-verify").verifyTikTokSession,
+  instagram: require("./instagram-verify").verifyInstagramSession,
 };
 
 async function buildPreview(records) {
@@ -347,6 +349,11 @@ async function processRecord(record, updateSessionKeys) {
       reason: safeMessage(error),
     };
   }
+
+  // Password/TOTP/recovery metadata is never put in account state or logs.
+  // Persist only when the operator configured the encrypted vault; cookie
+  // import remains independent and is already handled by Persona.
+  await credentialVault.store(accountId, record).catch(() => {});
 
   // 4. Cookie import (before the profile is ever attached - Persona
   // requires the profile to not be running for this call).

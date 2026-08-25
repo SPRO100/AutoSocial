@@ -6,6 +6,7 @@ const path = require("path");
 const { detectFormat, getSupplierById } = require("../src/importers/detector");
 const tiktokPipe7 = require("../src/importers/suppliers/tiktok-pipe7");
 const csv = require("../src/importers/suppliers/csv");
+const instagramColon = require("../src/importers/suppliers/instagram-colon");
 
 // Real fixture FILE (not just an inline string) matching the confirmed real
 // supplier format: a marketing/informational header (never real account
@@ -48,6 +49,32 @@ test("detectFormat returns null for a file containing only the seller's own colu
 test("getSupplierById finds the registered real adapter by id, null otherwise", () => {
   assert.equal(getSupplierById("tiktok-pipe7-v1").id, "tiktok-pipe7-v1");
   assert.equal(getSupplierById("does-not-exist"), null);
+});
+
+test("Instagram colon importer accepts password-only and cookie rows without exposing secrets", () => {
+  const result = instagramColon.parse("alice:pass\nbob:pass:sessionid=redacted; csrftoken=redacted");
+  assert.equal(result.errors.length, 0);
+  assert.deepEqual(result.records.map(({ platform, username, password, cookies }) => ({ platform, username, password, cookies })), [
+    { platform: "instagram", username: "alice", password: "pass", cookies: undefined },
+    { platform: "instagram", username: "bob", password: "pass", cookies: "sessionid=redacted; csrftoken=redacted" },
+  ]);
+});
+
+test("Instagram colon importer fails closed for ambiguous third fields", () => {
+  const result = instagramColon.parse("alice:pass:opaque-value");
+  assert.equal(result.records.length, 0);
+  assert.equal(result.errors[0].code, "PARSE_REVIEW_REQUIRED");
+});
+
+test("Instagram colon importer recognizes explicit TOTP plus cookie and safe preview masks it", () => {
+  const normalize = require("../src/importers/normalize");
+  const result = instagramColon.parse("alice:pass:JBSWY3DPEHPK3PXP:sessionid=secret");
+  assert.equal(result.errors.length, 0);
+  assert.equal(result.records[0].twoFactorSecret, "JBSWY3DPEHPK3PXP");
+  const safe = normalize.toSafePreview(result.records[0]);
+  assert.equal(safe.hasTwoFactor, true);
+  assert.equal(safe.hasCookies, true);
+  assert.equal(JSON.stringify(safe).includes("secret"), false);
 });
 
 // --- tiktok-pipe7 adapter itself --------------------------------------

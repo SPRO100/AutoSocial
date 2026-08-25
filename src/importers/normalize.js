@@ -18,6 +18,14 @@ const NORMALIZED_FIELDS = [
   "authToken",
   "externalId",
   "cookies",
+  "twoFactorSecret",
+  "userAgent",
+  "proxy",
+  "recoveryEmail",
+  "recoveryPassword",
+  "phone",
+  "parserStatus",
+  "parserConfidence",
 ];
 
 function createRecord(fields = {}) {
@@ -82,7 +90,7 @@ function countCookies(raw) {
 // import-preview route, which must never send anything but records already
 // passed through this.
 function toSafePreview(record) {
-  return {
+  const safe = {
     platform: record.platform || null,
     username: record.username || null,
     emailMasked: maskEmail(record.email),
@@ -94,6 +102,17 @@ function toSafePreview(record) {
     hasCookies: Boolean(record.cookies),
     cookieCount: countCookies(record.cookies),
   };
+  // Keep the long-standing preview contract byte-for-byte for legacy
+  // suppliers; extended fields are emitted only when the supplier actually
+  // supplied them.
+  if (Object.prototype.hasOwnProperty.call(record, "twoFactorSecret")) safe.hasTwoFactor = Boolean(record.twoFactorSecret);
+  if (Object.prototype.hasOwnProperty.call(record, "userAgent")) safe.hasUserAgent = Boolean(record.userAgent);
+  if (Object.prototype.hasOwnProperty.call(record, "proxy")) safe.hasProxy = Boolean(record.proxy);
+  if (Object.prototype.hasOwnProperty.call(record, "recoveryEmail")) safe.hasRecoveryEmail = Boolean(record.recoveryEmail);
+  if (Object.prototype.hasOwnProperty.call(record, "phone")) safe.hasPhone = Boolean(record.phone);
+  if (record.parserStatus) safe.parserStatus = record.parserStatus;
+  if (record.parserConfidence) safe.parserConfidence = record.parserConfidence;
+  return safe;
 }
 
 module.exports = {

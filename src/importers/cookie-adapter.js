@@ -18,6 +18,8 @@ const PLATFORM_DEFAULT_DOMAIN = {
   tiktok: ".tiktok.com",
   instagram: ".instagram.com",
   youtube: ".youtube.com",
+  threads: ".threads.net",
+  x: ".x.com",
 };
 
 // PRODUCTION BUG FOUND AND FIXED (forensic root-cause trace, see the
