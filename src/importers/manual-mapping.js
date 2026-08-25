@@ -25,7 +25,7 @@ function parse(content, platform, mapping) {
   const loginIndex = fields.username ?? fields.login ?? fields.email;
   const passwordIndex = fields.password;
   if (!Number.isInteger(Number(loginIndex)) || !Number.isInteger(Number(passwordIndex)) || used.filter((i) => i >= 0).length !== new Set(used.filter((i) => i >= 0)).size) return { records: [], errors: [{ reason: "login and password mappings are required and fields cannot be assigned twice", code: "PARSE_REVIEW_REQUIRED" }] };
-  const records = []; const errors = [];
+  const records = []; const errors = []; let ignoredMetadata = 0;
   const pushRecord = (values) => {
     const login = values[Number(loginIndex)] || ""; const password = values[Number(passwordIndex)] || "";
     if (!validLogin(login) || !password) return false;
@@ -51,12 +51,12 @@ function parse(content, platform, mapping) {
       if (fields.cookie !== undefined) values[Number(fields.cookie)] = item.cookie;
       pushRecord(values);
     }
-    return { records, errors };
+    return { records, errors, ignoredMetadata: Math.max(0, blockLines.length - blocks.length * 3) };
   }
   for (const { line, lineNumber } of lines(content)) {
     const values = splitRow(line, delimiter, fields.cookie === undefined ? undefined : Number(fields.cookie));
-    pushRecord(values);
+    if (!pushRecord(values)) ignoredMetadata += 1;
   }
-  return { records, errors };
+  return { records, errors, ignoredMetadata };
 }
 module.exports = { suggest, parse, detectDelimiter, splitRow };

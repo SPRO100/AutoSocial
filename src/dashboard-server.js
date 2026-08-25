@@ -693,7 +693,7 @@ async function createServer() {
       const parsed = manualMapping.parse(content, platform, mapping);
       if (!parsed.records.length) return res.status(400).json({ ok: false, code: "PARSE_REVIEW_REQUIRED", error: parsed.errors[0]?.reason || "Mapping produced no valid account records.", mapping: manualMapping.suggest(content, platform) });
       const preview = await buildPreview(parsed.records); const importId = uploadStore.put(parsed.records, { format: `manual-${platform}`, template: mapping.templateName || null });
-      res.json({ ok: true, requiresMapping: false, importId, format: `manual-${platform}`, total: parsed.records.length, parseErrors: parsed.errors, preview });
+      res.json({ ok: true, requiresMapping: false, importId, format: `manual-${platform}`, total: parsed.records.length, ignoredMetadata: parsed.ignoredMetadata || 0, parseErrors: parsed.errors, preview });
     } catch (error) { res.status(400).json({ ok: false, error: error.message }); }
   });
 
