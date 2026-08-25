@@ -12,7 +12,7 @@ function splitRow(row, delimiter, cookieIndex) {
   if (cookieIndex === undefined || cookieIndex < 0 || cookieIndex >= parts.length - 1) return parts.map((x) => x.trim());
   return [...parts.slice(0, cookieIndex), parts.slice(cookieIndex).join(delimiter)].map((x) => x.trim());
 }
-function mask(value) { if (!value) return null; const s = String(value); return s.length <= 2 ? "••" : `${s.slice(0, 1)}${"•".repeat(Math.min(8, s.length - 1))}`; }
+function mask(value) { if (!value) return null; const s = String(value); return s.length <= 2 ? "**" : `${s.slice(0, 1)}${"*".repeat(Math.min(8, s.length - 1))}`; }
 function suggest(content, platform) {
   const delimiter = detectDelimiter(content); const rows = lines(content).slice(0, 8);
   return { platform, delimiter: delimiter === "\t" ? "TAB" : delimiter, columns: Math.max(0, ...rows.map(({ line }) => line.split(delimiter).length)), rows: rows.map(({ line, lineNumber }) => ({ lineNumber, values: splitRow(line, delimiter).map(mask) })) };
