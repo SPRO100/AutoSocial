@@ -217,7 +217,7 @@ async function updateExistingAccountSession(existingAccount, record) {
     let session = null;
     try {
       session = await persona.attachPersonaProfile(profileId, { headless: true });
-      const result = await verify(session.page);
+      const result = await verify(session.page, record.username);
       sessionLabel = result.active ? "Active" : "Invalid";
       status = result.active ? "READY" : "NEEDS_LOGIN";
       reason = result.active ? null : result.reason;
@@ -405,7 +405,7 @@ async function processRecord(record, updateSessionKeys) {
     let session = null;
     try {
       session = await persona.attachPersonaProfile(profileId, { headless: true });
-      const result = await verify(session.page);
+      const result = await verify(session.page, record.username);
       sessionLabel = result.active ? "Active" : "Invalid";
       status = result.active ? "READY" : "NEEDS_LOGIN";
       reason = result.active ? null : result.reason;
