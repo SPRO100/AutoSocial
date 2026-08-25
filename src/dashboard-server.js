@@ -640,6 +640,13 @@ async function createServer() {
       }
       const supplier = detectFormat(content, { platform: typeof req.body?.platform === "string" ? req.body.platform : undefined });
       if (!supplier) {
+        if (typeof req.body?.platform === "string" && req.body.platform.trim()) {
+          return res.status(400).json({
+            ok: false,
+            code: "PARSE_REVIEW_REQUIRED",
+            error: `Platform is ${req.body.platform}, but no supported supplier schema was proven. Review the field mapping before import.`,
+          });
+        }
         return res.status(400).json({
           ok: false,
           error: "This file's format was not recognized by any supported supplier adapter.",
