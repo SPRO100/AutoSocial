@@ -28,6 +28,7 @@ const DEFAULT_CONCURRENCY = 2;
 // cheap async task. The Dashboard UI only ever offers up to 8; this is the
 // server-side backstop for any other caller.
 const MAX_CONCURRENCY = 8;
+const VERIFY_RETRY_DELAY_MS = 750;
 
 // Process-wide (not just per-batch) claim on a (platform, username) key
 // while it is actively being imported. Reserved synchronously - before any
@@ -47,6 +48,18 @@ const VERIFIERS = {
   tiktok: require("./tiktok-verify").verifyTikTokSession,
   instagram: require("./instagram-verify").verifyInstagramSession,
 };
+
+async function verifyWithTransientRetry(verify, page, username) {
+  let result = await verify(page, username);
+  // A freshly imported Persona cookie jar can expose the authenticated shell
+  // before Instagram's identity links finish hydrating. Retry only that
+  // specific, non-destructive diagnostic; never weaken identity checking.
+  if (!result.active && /identity did not match|identity marker/i.test(String(result.reason || ""))) {
+    await new Promise((resolve) => setTimeout(resolve, VERIFY_RETRY_DELAY_MS));
+    result = await verify(page, username);
+  }
+  return result;
+}
 
 async function buildPreview(records) {
   const seen = new Set();
@@ -217,7 +230,7 @@ async function updateExistingAccountSession(existingAccount, record) {
     let session = null;
     try {
       session = await persona.attachPersonaProfile(profileId, { headless: true });
-      const result = await verify(session.page, record.username);
+      const result = await verifyWithTransientRetry(verify, session.page, record.username);
       sessionLabel = result.active ? "Active" : "Invalid";
       status = result.active ? "READY" : "NEEDS_LOGIN";
       reason = result.active ? null : result.reason;
@@ -405,7 +418,7 @@ async function processRecord(record, updateSessionKeys) {
     let session = null;
     try {
       session = await persona.attachPersonaProfile(profileId, { headless: true });
-      const result = await verify(session.page, record.username);
+      const result = await verifyWithTransientRetry(verify, session.page, record.username);
       sessionLabel = result.active ? "Active" : "Invalid";
       status = result.active ? "READY" : "NEEDS_LOGIN";
       reason = result.active ? null : result.reason;
