@@ -638,7 +638,7 @@ async function createServer() {
       if (Buffer.byteLength(content, "utf8") > MAX_IMPORT_FILE_BYTES) {
         return res.status(400).json({ ok: false, error: "File is too large." });
       }
-      const supplier = detectFormat(content);
+      const supplier = detectFormat(content, { platform: typeof req.body?.platform === "string" ? req.body.platform : undefined });
       if (!supplier) {
         return res.status(400).json({
           ok: false,

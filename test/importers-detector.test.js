@@ -7,6 +7,7 @@ const { detectFormat, getSupplierById } = require("../src/importers/detector");
 const tiktokPipe7 = require("../src/importers/suppliers/tiktok-pipe7");
 const csv = require("../src/importers/suppliers/csv");
 const instagramColon = require("../src/importers/suppliers/instagram-colon");
+const youtubeSupplier = require("../src/importers/suppliers/youtube-supplier");
 
 // Real fixture FILE (not just an inline string) matching the confirmed real
 // supplier format: a marketing/informational header (never real account
@@ -106,6 +107,27 @@ test("Instagram colon importer does not claim metadata-only files", () => {
   const result = supplier.parse(input);
   assert.equal(result.records.length, 0);
   assert.equal(result.ignoredMetadata, 3);
+});
+
+test("universal detector selects YouTube supplier from mixed metadata and pipe rows", () => {
+  const input = [
+    "Order instructions: use a secure browser",
+    "seller.example: https://youtube.com/channel/demo",
+    "creator@example.test|SafePass456|recovery@example.test|https://youtube.com/channel/UCdemo|Mozilla/5.0 Chrome/120.0|SID=opaque; HSID=opaque",
+  ].join("\n");
+  const supplier = detectFormat(input);
+  assert.equal(supplier.id, "youtube-supplier-v1");
+  const parsed = supplier.parse(input);
+  assert.equal(parsed.records.length, 1);
+  assert.equal(parsed.records[0].platform, "youtube");
+  assert.equal(parsed.records[0].externalId, "https://youtube.com/channel/UCdemo");
+  assert.equal(parsed.records[0].userAgent, "Mozilla/5.0 Chrome/120.0");
+  assert.equal(parsed.records[0].cookies, "SID=opaque; HSID=opaque");
+});
+
+test("manual platform selection can select the YouTube adapter without auto-detection", () => {
+  const supplier = detectFormat("creator@example.test|SafePass456|https://youtube.com/channel/UCdemo", { platform: "youtube" });
+  assert.equal(supplier.id, "youtube-supplier-v1");
 });
 
 // --- tiktok-pipe7 adapter itself --------------------------------------

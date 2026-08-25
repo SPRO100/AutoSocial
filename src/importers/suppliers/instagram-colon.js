@@ -11,13 +11,13 @@ function isCredentialLogin(value) {
   // Supplier identities are usernames/emails, never prose. Keep this
   // deliberately conservative: a false negative is reviewable; importing a
   // marketing sentence as an account is not.
-  return /^[A-Za-z0-9][A-Za-z0-9._+@-]{2,127}$/.test(String(value || "").trim());
+  return /^@?[A-Za-z0-9][A-Za-z0-9._+@-]{1,127}$/.test(String(value || "").trim());
 }
 function classifyLine(line) {
   const first = line.indexOf(":");
   if (first <= 0) return "SUPPLIER_METADATA";
   const login = line.slice(0, first).trim();
-  if (!isCredentialLogin(login) || /^https?$/i.test(login) || /\s/.test(login)) return "SUPPLIER_METADATA";
+  if (!isCredentialLogin(login) || /^(?:order|important|instructions?|warning|note|received|support|login|username|password|cookie|proxy|your)$/i.test(login) || /^https?$/i.test(login) || /\s/.test(login)) return "SUPPLIER_METADATA";
   const second = line.indexOf(":", first + 1);
   const passwordPart = line.slice(first + 1, second < 0 ? line.length : second).trim();
   if (!passwordPart) return "INVALID";
@@ -28,7 +28,11 @@ function classifyLine(line) {
   return "ACCOUNT_RECORD";
 }
 function test(text) {
-  return lines(text).some(({ line }) => !line.includes(",") && classifyLine(line) === "ACCOUNT_RECORD");
+  return score(text).validRows > 0;
+}
+function score(text) {
+  const rows = lines(text).filter(({ line }) => !line.includes(",") && classifyLine(line) === "ACCOUNT_RECORD");
+  return { candidateRows: rows.length, validRows: rows.length, confidence: rows.length >= 2 ? "HIGH" : "MEDIUM" };
 }
 function parse(text) {
   const records = []; const errors = []; let ignoredMetadata = 0; let invalid = 0;
@@ -67,4 +71,4 @@ function parse(text) {
   }
   return { records, errors, ignoredMetadata, invalid, classifications };
 }
-module.exports = { id: ID, test, parse };
+module.exports = { id: ID, test, score, parse };
