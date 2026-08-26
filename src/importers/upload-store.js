@@ -11,7 +11,11 @@
 // behind by a crash, or picked up by an unrelated process.
 const crypto = require("crypto");
 
-const DEFAULT_TTL_MS = 15 * 60 * 1000;
+// A human operator needs time to inspect a multi-account preview, resolve
+// duplicates, and explicitly confirm it. Keep the normalized records
+// memory-only, but use a bounded review window rather than expiring during a
+// normal Dashboard workflow.
+const DEFAULT_TTL_MS = 45 * 60 * 1000;
 
 const store = new Map();
 

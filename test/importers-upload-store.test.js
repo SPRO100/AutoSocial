@@ -5,6 +5,11 @@ const uploadStore = require("../src/importers/upload-store");
 
 test.beforeEach(() => uploadStore._clearAllForTests());
 
+test("default pending import lifetime is long enough for normal human review but remains bounded", () => {
+  assert.ok(uploadStore.DEFAULT_TTL_MS >= 30 * 60 * 1000);
+  assert.ok(uploadStore.DEFAULT_TTL_MS <= 60 * 60 * 1000);
+});
+
 test("put then take returns the exact records held, and take is single-use", () => {
   const records = [{ platform: "tiktok", username: "a", password: "secret" }];
   const importId = uploadStore.put(records, { format: "tiktok-pipe7-v1" });
