@@ -131,3 +131,61 @@ test("checkSession result never contains a cookie/token/password value - only th
   const serialized = JSON.stringify(result);
   assert.ok(!serialized.toLowerCase().includes("sessionid="));
 });
+
+// --- Real incident regression (2026-08-26): Instagram sign-up redirect was
+// misclassified as an authenticated session, through the REAL checkSession
+// entrypoint (not just the isolated verifier unit) - the exact path
+// publishing preflight actually calls. ---------------------------------
+
+function makeInstagramFakePage(finalUrl, bodyText = "") {
+  return {
+    goto: async () => {},
+    waitForLoadState: async () => {},
+    url: () => finalUrl,
+    locator: () => ({ first: () => ({}), innerText: async () => bodyText, count: async () => 0, evaluateAll: async () => [] }),
+  };
+}
+
+test("checkSession reports 'needs_login' (never 'ready') for a real Instagram account redirected to the sign-up flow - the exact real incident", async () => {
+  const { sessionCheck, accountManager } = await freshSessionCheck({
+    persona: {
+      attachPersonaProfile: async (id) => ({
+        profileId: id, browser: {}, context: {}, info: { port: 1 },
+        page: makeInstagramFakePage("https://www.instagram.com/accounts/emailsignup/", "Get started on Instagram\nSign up to see photos and videos from your friends."),
+      }),
+    },
+  });
+  const account = await accountManager.addAccount("kinsleyvaughn6", { importPlatform: "instagram", importUsername: "kinsleyvaughn6" });
+  await accountManager.setPersonaProfileId(account.id, "session-check-profile-1");
+
+  const result = await sessionCheck.checkSession(account.id, "instagram");
+  assert.equal(result.sessionStatus, "needs_login");
+  assert.match(result.reason, /sign-up|not authenticated/i);
+
+  const reloaded = await accountManager.getAccountById(account.id);
+  assert.equal(reloaded.sessionStatus, "needs_login", "preflight/CONTENT-OS must never see a stale/false 'ready' persisted for this account");
+});
+
+test("checkSession reports 'ready' for a real Instagram account on an authenticated shell matching the imported identity", async () => {
+  const { sessionCheck, accountManager } = await freshSessionCheck({
+    persona: {
+      attachPersonaProfile: async (id) => ({
+        profileId: id, browser: {}, context: {}, info: { port: 1 },
+        page: {
+          goto: async () => {}, waitForLoadState: async () => {}, url: () => "https://www.instagram.com/",
+          locator: (selector) => ({
+            first: () => ({}),
+            innerText: async () => "",
+            count: async () => (selector === "nav" ? 1 : 0),
+            evaluateAll: async () => (selector === 'a[href^="/"]' ? ["kinsleyvaughn6", "direct", "explore"] : []),
+          }),
+        },
+      }),
+    },
+  });
+  const account = await accountManager.addAccount("kinsleyvaughn6", { importPlatform: "instagram", importUsername: "kinsleyvaughn6" });
+  await accountManager.setPersonaProfileId(account.id, "session-check-profile-1");
+
+  const result = await sessionCheck.checkSession(account.id, "instagram");
+  assert.equal(result.sessionStatus, "ready");
+});

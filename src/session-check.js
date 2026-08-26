@@ -41,6 +41,18 @@ function safeMessage(error) {
   return error && error.message ? error.message : String(error);
 }
 
+// The page's own URL is never a secret (no query/hash tokens are ever
+// appended by any of these platforms' real navigation flows this codebase
+// drives) - safe to log as-is for diagnosing exactly which real page a
+// session check/publish landed on.
+function safeFinalUrl(page) {
+  try {
+    return typeof page.url === "function" ? page.url() : "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
 // tiktok-verify.js's own reason strings are a small fixed vocabulary except
 // for its one exception-path fallback ("verification failed: <raw error>"),
 // which can embed a raw Playwright/navigation error message. sessionReason
@@ -92,12 +104,26 @@ async function checkSessionUnlocked(accountId, requestedPlatform) {
   let reason = null;
   try {
     session = await persona.attachPersonaProfile(profileId, { headless: true });
-    const result = await verify(session.page);
+    // Bind the check to the real imported identity when the verifier
+    // supports it (currently Instagram) - never lets a session that's
+    // authenticated as a DIFFERENT account read as Ready for this one.
+    // Verifiers that don't accept a second argument (TikTok, YouTube, ...)
+    // simply ignore it.
+    const result = await verify(session.page, account.name || null);
     sessionStatus = result.active ? "ready" : "needs_login";
     reason = result.active ? null : safeVerifyReason(result.reason);
-  } catch {
+    // Safe diagnostic observability: account/platform/decision/reason and
+    // the real final URL the verifier landed on - never a cookie, token, or
+    // password value (none of those ever reach this module in the first
+    // place; session.page only exposes navigation state).
+    console.log(
+      `[session-check] account=${accountId} platform=${platform} status=${sessionStatus} ` +
+      `finalUrl=${safeFinalUrl(session.page)} reason=${JSON.stringify(reason || result.reason || null)}`
+    );
+  } catch (error) {
     sessionStatus = "error";
     reason = "Could not verify the session (Persona attach failed).";
+    console.warn(`[session-check] account=${accountId} platform=${platform} status=error reason=${safeMessage(error)}`);
   } finally {
     if (session) {
       await persona.disconnectPersonaBrowser(session).catch(() => {});

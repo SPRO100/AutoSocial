@@ -3,9 +3,11 @@ const { config } = require("./config");
 const uiLabels = require("./platform-ui-labels");
 const {
   getActiveAccount,
+  getAccountById,
   hasSavedPlatformSession,
 } = require("./account-manager");
 const { acquireBrowserSession } = require("./browser-session");
+const { verifyInstagramSession } = require("./importers/instagram-verify");
 
 const REALISTIC_USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
@@ -335,6 +337,20 @@ async function uploadMedia({ mediaPaths, caption, accountId, publicationType = "
   try {
     session = await openBrowserSession(accountId);
     const { page } = session;
+
+    // Defense in depth (real incident, 2026-08-26): CONTENT-OS's preflight
+    // already runs a fresh session check before requesting a publish, but a
+    // real human Approval step can sit between preflight and this call -
+    // the session can genuinely change state in that window. Media upload
+    // must never begin against an unauthenticated session regardless of
+    // what an earlier check reported; this reuses the SAME authoritative
+    // verifier session-check.js uses, never a second/looser check.
+    const account = await getAccountById(accountId).catch(() => null);
+    const verification = await verifyInstagramSession(page, account ? account.name : null);
+    if (!verification.active) {
+      throw new Error(`Instagram session requires login: ${verification.reason}`);
+    }
+
     telemetry.phase = "NAVIGATION";
     telemetry.navigationStarted = true;
     await gotoUploadPage(page);
