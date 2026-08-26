@@ -30,9 +30,15 @@ async function resolveAccount(accountId) {
 }
 
 async function acquirePersonaSession(account) {
+  // Server-side AutoSocial workers commonly run without a graphical DISPLAY.
+  // Passing headless=false in that environment makes Persona launch a browser
+  // that never exposes CDP, while the identical fresh session check already
+  // uses headless=true. Keep both paths on the same deterministic readiness
+  // contract; retain visible mode when an operator explicitly has a display.
+  const headless = config.headless || !process.env.DISPLAY;
   const { browser, context, page, profileId } = await attachPersonaProfile(
     account.personaProfileId,
-    { headless: config.headless }
+    { headless }
   );
   return {
     backend: "persona",
