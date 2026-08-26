@@ -80,6 +80,17 @@ function tiktokRecord(username, overrides = {}) {
   return { platform: "tiktok", username, password: "pw", cookies: "sessionid=abc123", ...overrides };
 }
 
+test("selectRecords restricts a preview confirmation to the selected canonical identities", async () => {
+  const { pipeline } = await freshPipeline();
+  const records = [tiktokRecord("one"), tiktokRecord("two"), tiktokRecord("three")];
+  assert.deepEqual(pipeline.selectRecords(records, ["tiktok:two"]).map((record) => record.username), ["two"]);
+  assert.deepEqual(pipeline.selectRecords(records, ["tiktok:one", "tiktok:three"]).map((record) => record.username), ["one", "three"]);
+  assert.deepEqual(pipeline.selectRecords(records, ["tiktok:one", "unknown:account"]).map((record) => record.username), ["one"]);
+  assert.deepEqual(pipeline.selectRecords(records, []).map((record) => record.username), []);
+  // Internal callers that omit the option retain the established full-batch contract.
+  assert.equal(pipeline.selectRecords(records).length, 3);
+});
+
 test("a fully successful import creates the account, creates+links a Persona profile, imports cookies, and verifies an active session -> READY", async () => {
   const { pipeline, accountManager } = await freshPipeline({ sessionUrl: ACTIVE_URL });
   const report = await pipeline.importBatch([tiktokRecord("account1")]);

@@ -127,6 +127,7 @@ const UI = {
     importUploadErrorText: document.getElementById("importUploadErrorText"),
     importPreviewStep: document.getElementById("importPreviewStep"),
     importPreviewSummary: document.getElementById("importPreviewSummary"),
+    importSelectionSummary: document.getElementById("importSelectionSummary"),
     importPreviewTableBody: document.getElementById("importPreviewTableBody"),
     importConcurrencyInput: document.getElementById("importConcurrencyInput"),
     importConfirmBtn: document.getElementById("importConfirmBtn"),
@@ -502,6 +503,11 @@ const UI = {
     }
     if (this.els.importConfirmBtn) {
       this.els.importConfirmBtn.addEventListener("click", () => this.handleImportConfirm());
+    }
+    if (this.els.importPreviewTableBody) {
+      this.els.importPreviewTableBody.addEventListener("change", (event) => {
+        if (event.target?.classList?.contains("import-record-checkbox")) this.updateImportSelectionState();
+      });
     }
     if (this.els.importCancelBtn) {
       this.els.importCancelBtn.addEventListener("click", () => this.resetImportFlow());
@@ -2165,6 +2171,7 @@ const UI = {
         }
         return `
         <tr>
+          <td><input type="checkbox" class="import-record-checkbox" data-key="${escapeHtml(r.key || "")}" aria-label="Select ${escapeHtml(r.username || "account")}"></td>
           <td>${escapeHtml(r.platform || "-")}</td>
           <td>${escapeHtml(r.username || "-")}</td>
           <td>${escapeHtml(r.emailMasked || "-")}</td>
@@ -2174,10 +2181,29 @@ const UI = {
         </tr>`;
       })
       .join("");
+    this.updateImportSelectionState();
+  },
+
+  updateImportSelectionState() {
+    const selected = Array.from(this.els.importPreviewTableBody?.querySelectorAll(".import-record-checkbox:checked") || []);
+    const total = this.els.importPreviewTableBody?.querySelectorAll(".import-record-checkbox").length || 0;
+    if (this.els.importSelectionSummary) {
+      this.els.importSelectionSummary.textContent = selected.length
+        ? `${selected.length} of ${total} account(s) selected for import.`
+        : "Select at least one account to continue. Nothing will be imported until you confirm.";
+    }
+    if (this.els.importConfirmBtn) this.els.importConfirmBtn.disabled = selected.length === 0;
   },
 
   async handleImportConfirm() {
     if (!this.importId) return;
+    const selectedKeys = Array.from(
+      this.els.importPreviewTableBody?.querySelectorAll(".import-record-checkbox:checked") || []
+    ).map((el) => el.dataset.key).filter(Boolean);
+    if (!selectedKeys.length) {
+      this.updateImportSelectionState();
+      return;
+    }
     // Explicit, per-row opt-in only - an unchecked existing account stays
     // the safe default (skipped), never updated automatically.
     const updateSessionKeys = Array.from(
@@ -2187,7 +2213,7 @@ const UI = {
     this.els.importRunningStep.style.display = "";
     try {
       const concurrency = Number(this.els.importConcurrencyInput?.value) || 2;
-      const result = await API.post("/api/import/confirm", { importId: this.importId, concurrency, updateSessionKeys });
+      const result = await API.post("/api/import/confirm", { importId: this.importId, concurrency, selectedKeys, updateSessionKeys });
       this.renderImportResults(result.report);
       this.els.importRunningStep.style.display = "none";
       this.els.importResultsStep.style.display = "";

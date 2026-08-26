@@ -50,7 +50,7 @@ const { computeAccountPersona, indexProfilesById } = require("./persona-overview
 const { detectFormat } = require("./importers/detector");
 const manualMapping = require("./importers/manual-mapping");
 const templateStore = require("./importers/template-store");
-const { buildPreview, importBatch } = require("./importers/pipeline");
+const { buildPreview, importBatch, selectRecords } = require("./importers/pipeline");
 const uploadStore = require("./importers/upload-store");
 const accountDeletion = require("./account-deletion");
 const sessionCheck = require("./session-check");
@@ -737,6 +737,13 @@ async function createServer() {
       if (!importId) {
         return res.status(400).json({ ok: false, error: "Missing importId." });
       }
+      // A preview is safe by default: an explicit selection is required for
+      // the Dashboard's current operator flow. Keep omitted selectedKeys
+      // backward-compatible for trusted/internal callers, but never consume
+      // an upload when the UI submits an empty selection.
+      if (Array.isArray(req.body?.selectedKeys) && req.body.selectedKeys.length === 0) {
+        return res.status(400).json({ ok: false, error: "Select at least one account before confirming import." });
+      }
       const entry = uploadStore.take(importId);
       if (!entry) {
         return res.status(400).json({
@@ -752,7 +759,13 @@ async function createServer() {
       const updateSessionKeys = Array.isArray(req.body?.updateSessionKeys)
         ? req.body.updateSessionKeys.filter((k) => typeof k === "string")
         : [];
-      const report = await importBatch(entry.records, { concurrency, updateSessionKeys });
+      const selectedRecords = selectRecords(entry.records, req.body?.selectedKeys);
+      if (!selectedRecords.length) {
+        return res.status(400).json({ ok: false, error: "No valid selected account records remain in this preview." });
+      }
+      const selectedKeySet = new Set(selectedRecords.map((record) => `${String(record.platform).toLowerCase()}:${String(record.username).toLowerCase()}`));
+      const selectedUpdateSessionKeys = updateSessionKeys.filter((key) => selectedKeySet.has(key.toLowerCase()));
+      const report = await importBatch(selectedRecords, { concurrency, updateSessionKeys: selectedUpdateSessionKeys });
       for (const result of report.results) {
         if (result.accountId) {
           try {

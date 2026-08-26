@@ -537,6 +537,21 @@ async function importBatch(records, { concurrency = DEFAULT_CONCURRENCY, updateS
   return report;
 }
 
+// Restrict a confirmed upload to the operator-selected preview rows.  The
+// key is the same canonical platform/username identity used for duplicate
+// protection, so the client never sends credentials or array indexes back to
+// the server.  An omitted selection preserves the legacy batch behaviour;
+// an explicit empty selection is rejected by the HTTP route before this
+// helper is called.
+function selectRecords(records, selectedKeys) {
+  if (selectedKeys === undefined) return records;
+  const keys = new Set(Array.isArray(selectedKeys) ? selectedKeys.filter((key) => typeof key === "string") : []);
+  return records.filter((record) => {
+    const key = duplicateKey(record);
+    return key && keys.has(key);
+  });
+}
+
 // Read-only visibility into the same concurrency claim importBatch uses,
 // for account-deletion.js: deleting a Persona profile while an import/
 // update-session for the very same (platform, username) is mid-flight
@@ -547,4 +562,4 @@ function isImportKeyActive(key) {
   return Boolean(key) && activeImportKeys.has(key);
 }
 
-module.exports = { buildPreview, importBatch, DEFAULT_CONCURRENCY, MAX_CONCURRENCY, isImportKeyActive };
+module.exports = { buildPreview, importBatch, selectRecords, DEFAULT_CONCURRENCY, MAX_CONCURRENCY, isImportKeyActive };
