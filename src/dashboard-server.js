@@ -550,7 +550,10 @@ async function createServer() {
       if (!profileId) {
         throw new Error("This account has no linked Persona profile.");
       }
-      const result = await startPersonaBrowser(profileId, { headless: config.headless });
+      // Dashboard runs as a server worker and may not have a graphical
+      // DISPLAY. Use the same headless Persona handshake as check-session;
+      // a visible operator session can still be started from Persona Studio.
+      const result = await startPersonaBrowser(profileId, { headless: true });
       res.json({ ok: true, ...result });
     } catch (error) {
       res.status(400).json({ ok: false, error: error.message });
