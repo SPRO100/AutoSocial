@@ -4,6 +4,13 @@ const fs = require("fs/promises");
 const os = require("os");
 const path = require("path");
 
+// This file exercises the recovery STATE MACHINE through the real
+// pipeline, not real settle timing (that's proven in its own dedicated
+// tests in test/session-recovery.test.js) - disabled here so the
+// cookie-consent-recovery tests below don't spend several real seconds
+// waiting on every run.
+process.env.AUTOSOCIAL_RECOVERY_SETTLE_DELAY_MS = "0";
+
 function installFakeModule(modulePath, exportsValue) {
   const resolved = require.resolve(modulePath);
   require.cache[resolved] = { id: resolved, filename: resolved, loaded: true, exports: exportsValue };

@@ -31,17 +31,60 @@
 // already prevents an infinite loop):
 //   1. maxAttempts hard-caps total verify calls regardless of anything else.
 //   2. A (state, url) signature seen twice in the same run stops immediately
-//      as REDIRECT_LOOP, even if attempts remain in the budget.
+//      as REDIRECT_LOOP (or BLOCKED_CHALLENGE - see below), even if
+//      attempts remain in the budget.
 //   3. A recovery action that reports performed:false (nothing safe found
 //      to click) stops immediately as RECOVERY_EXHAUSTED - never retried
 //      with the same action against the same state.
 const MAX_ATTEMPTS_DEFAULT = 3;
 
-// Every recovery-eligible verify result MUST be one of these before the
-// pipeline will attempt anything - never inferred from the reason string,
-// never expanded implicitly. Kept as a plain re-export point rather than a
-// second source of truth: callers pass their own platform's
-// SAFE_RECOVERABLE_STATES (from e.g. importers/instagram-recovery.js).
+// Real production forensic finding (2026-08-26, brenda9875428/bruna118564):
+// a cookie-consent click's own promise resolving is not evidence that
+// Instagram's server-side consent transaction has settled - the very next
+// verify() call could read a still-transitioning page. This is a bounded,
+// fixed pause between "action performed" and "re-verify", not a retry or a
+// navigation - it changes nothing about WHAT gets classified, only WHEN the
+// read happens.
+//
+// Env-overridable the same way cookie-adapter.js's header-cookie TTL is -
+// callers (pipeline.js, session-check.js) never pass this explicitly, so
+// production always gets the real default; tests set
+// AUTOSOCIAL_RECOVERY_SETTLE_DELAY_MS=0 (module-cache-substitution
+// convention, same as every other test in this suite) so real recovery
+// runs don't sit through several real seconds per test.
+const DEFAULT_SETTLE_DELAY_MS = 2500;
+
+function resolveSettleDelayMsDefault() {
+  const raw = process.env.AUTOSOCIAL_RECOVERY_SETTLE_DELAY_MS;
+  if (raw === undefined || raw === "") return DEFAULT_SETTLE_DELAY_MS;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    console.warn(
+      `[session-recovery] Ignoring invalid AUTOSOCIAL_RECOVERY_SETTLE_DELAY_MS=${JSON.stringify(raw)} ` +
+      `(must be a non-negative number of milliseconds) - using the default of ${DEFAULT_SETTLE_DELAY_MS}ms instead.`
+    );
+    return DEFAULT_SETTLE_DELAY_MS;
+  }
+  return parsed;
+}
+
+const SETTLE_DELAY_MS_DEFAULT = resolveSettleDelayMsDefault();
+
+// Real production forensic finding (2026-08-26): a manually-driven session
+// showed Instagram's own server oscillating between a consent/cookie screen
+// and its scraping_warning anti-automation challenge - confirmed via
+// DevTools Network tab as genuine server-side 302 redirects, not a client
+// bug. Our automated recovery never drives a session that far (it only ever
+// acts on COOKIE_CONSENT_REQUIRED), but if a future verify/re-verify ever
+// observes two DIFFERENT members of this family within one recovery run,
+// that is materially different from - and more severe than - either a
+// plain repeated state (REDIRECT_LOOP) or a single, first-seen
+// SCRAPING_WARNING/PRIVACY_CHOICE_REQUIRED: it means the session itself is
+// stuck oscillating between a policy/cookie decision and a security
+// challenge, which no automated retry can resolve. Never added to any
+// SAFE_RECOVERABLE_STATES set - this classification exists to stop
+// harder/more clearly, never to unlock a new automated action.
+const CHALLENGE_OSCILLATION_FAMILY = new Set(["SCRAPING_WARNING", "PRIVACY_CHOICE_REQUIRED", "COOKIE_CONSENT_REQUIRED"]);
 
 function nowIso() {
   return new Date().toISOString();
@@ -49,6 +92,10 @@ function nowIso() {
 
 function safeMessage(error) {
   return error && error.message ? error.message : String(error);
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 // One entry per verify/recovery step - the exact shape the product
@@ -87,9 +134,11 @@ async function recoverSession({
   platform = null,
   personaProfileId = null,
   maxAttempts = MAX_ATTEMPTS_DEFAULT,
+  settleDelayMs = SETTLE_DELAY_MS_DEFAULT,
 }) {
   const attempts = [];
   const seenSignatures = new Set();
+  const seenFamilyStates = new Set();
   let attemptNumber = 0;
 
   let classification;
@@ -113,18 +162,36 @@ async function recoverSession({
       return { ...classification, attempts };
     }
 
+    // Computed BEFORE this iteration's own bookkeeping mutates
+    // seenFamilyStates, so it only ever reflects a DIFFERENT family member
+    // seen in an EARLIER iteration - never the current one counting itself.
+    const isFamilyMember = CHALLENGE_OSCILLATION_FAMILY.has(classification.state);
+    const sawDifferentFamilyMemberBefore = isFamilyMember && [...seenFamilyStates].some((s) => s !== classification.state);
+
     const signature = `${classification.state}|${classification.url || ""}`;
     if (seenSignatures.has(signature)) {
-      const loopState = { ...classification, state: "REDIRECT_LOOP", reason: `detected a repeated state/URL during recovery (last: ${classification.state}) - stopping to avoid an infinite loop` };
-      attempts.push(recordAttempt({ account, platform, personaProfileId, attempt: attemptNumber, classification: loopState, action: null, result: "REDIRECT_LOOP", nextAction: "operator review required" }));
+      const finalState = sawDifferentFamilyMemberBefore ? "BLOCKED_CHALLENGE" : "REDIRECT_LOOP";
+      const loopState = {
+        ...classification,
+        state: finalState,
+        reason: finalState === "BLOCKED_CHALLENGE"
+          ? `Instagram is oscillating between a consent/cookie screen and its anti-automation challenge (last: ${classification.state}) - this requires manual/account-level resolution, not an automated retry`
+          : `detected a repeated state/URL during recovery (last: ${classification.state}) - stopping to avoid an infinite loop`,
+      };
+      attempts.push(recordAttempt({ account, platform, personaProfileId, attempt: attemptNumber, classification: loopState, action: null, result: finalState, nextAction: terminalNextAction(finalState) }));
       return { ...loopState, active: false, attempts };
     }
     seenSignatures.add(signature);
+    if (isFamilyMember) seenFamilyStates.add(classification.state);
 
     const recoverable = recover && recover.SAFE_RECOVERABLE_STATES.has(classification.state);
     if (!recoverable) {
-      attempts.push(recordAttempt({ account, platform, personaProfileId, attempt: attemptNumber, classification, action: null, result: classification.state, nextAction: terminalNextAction(classification.state) }));
-      return { ...classification, attempts };
+      const finalState = sawDifferentFamilyMemberBefore ? "BLOCKED_CHALLENGE" : classification.state;
+      const finalClassification = sawDifferentFamilyMemberBefore
+        ? { ...classification, state: "BLOCKED_CHALLENGE", reason: `Instagram is oscillating between a consent/cookie screen and its anti-automation challenge (currently: ${classification.state}) - this requires manual/account-level resolution, not an automated retry` }
+        : classification;
+      attempts.push(recordAttempt({ account, platform, personaProfileId, attempt: attemptNumber, classification: finalClassification, action: null, result: finalState, nextAction: terminalNextAction(finalState) }));
+      return { ...finalClassification, attempts };
     }
 
     if (attemptNumber >= maxAttempts) {
@@ -146,6 +213,13 @@ async function recoverSession({
     }
 
     attempts.push(recordAttempt({ account, platform, personaProfileId, attempt: attemptNumber, classification, action, result: "RECOVERY_RETRYABLE", nextAction: "re-verify after recovery action" }));
+
+    // Real production forensic finding (2026-08-26): give Instagram's
+    // server-side consent transaction a bounded chance to settle before
+    // reading the resulting state - a click's promise resolving is not
+    // evidence the transition is complete. Never a retry, never extra
+    // navigation - only WHEN the next read happens changes. 0 in tests.
+    if (settleDelayMs > 0) await sleep(settleDelayMs);
 
     attemptNumber += 1;
     try {
@@ -173,6 +247,8 @@ function terminalNextAction(state) {
       return "operator must resolve this manually through Instagram's own flow - never automated";
     case "LOGIN_REQUIRED":
       return "operator must re-authenticate this account";
+    case "BLOCKED_CHALLENGE":
+      return "operator/account-level review required - the session is oscillating between consent and a security challenge, do not retry automatically";
     default:
       return "operator review required";
   }
@@ -209,4 +285,4 @@ function mapToSessionStatus(classification) {
   return classification.challenge ? "challenge_required" : "needs_login";
 }
 
-module.exports = { recoverSession, mapToPipelineStatus, mapToSessionStatus, MAX_ATTEMPTS_DEFAULT };
+module.exports = { recoverSession, mapToPipelineStatus, mapToSessionStatus, MAX_ATTEMPTS_DEFAULT, SETTLE_DELAY_MS_DEFAULT, CHALLENGE_OSCILLATION_FAMILY };

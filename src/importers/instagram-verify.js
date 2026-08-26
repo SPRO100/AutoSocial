@@ -44,11 +44,15 @@
 // re-check; a false "active" is a real external-publish mistake, as the
 // 2026-08-26 incident showed.
 
-// Closed set of granular states this module (and the recovery pipeline
-// built on it) ever produces. READY is the only "authenticated" outcome;
-// every other value is a specific reason publishing must not proceed yet.
-// Keep in sync with ../session-recovery.js's SAFE_RECOVERABLE_STATES and
-// with content-os's mirrored type (src/server/integrations/autosocial.ts).
+// Closed set of granular states this module (gate-driven) and the recovery
+// pipeline built on it (../session-recovery.js, which additionally assigns
+// REDIRECT_LOOP/BLOCKED_CHALLENGE/RECOVERY_EXHAUSTED from its own loop
+// logic - this module never returns those three itself) ever produce.
+// READY is the only "authenticated" outcome; every other value is a
+// specific reason publishing must not proceed yet. Keep in sync with
+// ../session-recovery.js's CHALLENGE_OSCILLATION_FAMILY/
+// SAFE_RECOVERABLE_STATES and with content-os's mirrored type
+// (src/server/integrations/autosocial.ts).
 const STATES = {
   READY: "READY",
   COOKIE_CONSENT_REQUIRED: "COOKIE_CONSENT_REQUIRED",
@@ -58,6 +62,12 @@ const STATES = {
   TWO_FACTOR_REQUIRED: "TWO_FACTOR_REQUIRED",
   CAPTCHA_REQUIRED: "CAPTCHA_REQUIRED",
   LOGIN_REQUIRED: "LOGIN_REQUIRED",
+  // Assigned only by session-recovery.js's loop (never by matchGate below) -
+  // real production finding (2026-08-26): Instagram's own server can
+  // oscillate a session between a consent/cookie screen and its
+  // scraping_warning anti-automation challenge. Listed here so it's part of
+  // the one canonical enum, not a second source of truth.
+  BLOCKED_CHALLENGE: "BLOCKED_CHALLENGE",
   FAILED: "FAILED",
 };
 

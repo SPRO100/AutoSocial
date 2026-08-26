@@ -54,11 +54,44 @@ test("attemptRecovery reports performed:false gracefully when the page has no bu
 });
 
 test("attemptRecovery never attempts any action for a security/policy state - only cookie consent has an implementation", async () => {
-  for (const state of ["PRIVACY_CHOICE_REQUIRED", "SCRAPING_WARNING", "SECURITY_CHALLENGE", "TWO_FACTOR_REQUIRED", "CAPTCHA_REQUIRED", "LOGIN_REQUIRED"]) {
+  for (const state of ["PRIVACY_CHOICE_REQUIRED", "SCRAPING_WARNING", "SECURITY_CHALLENGE", "TWO_FACTOR_REQUIRED", "CAPTCHA_REQUIRED", "LOGIN_REQUIRED", "BLOCKED_CHALLENGE"]) {
     const page = makePageWithButtons(["Allow all cookies"]); // even with a clickable button present
     const result = await attemptRecovery(page, state);
     assert.equal(result.performed, false, `${state} must never trigger an automated action`);
   }
+});
+
+// Regression lock (real production requirement, 2026-08-26): this module
+// must never silently evolve into a generic "click through Instagram until
+// something works" system. The real ads-data-processing/subscription
+// consent flow an operator manually traced uses exactly this button
+// sequence - none of it may ever match, even when presented as the ONLY
+// buttons on a COOKIE_CONSENT_REQUIRED page (the most permissive case:
+// if these were going to false-positive-match anything, this is where it
+// would happen, since there's nothing else for the pattern search to find
+// instead).
+test("attemptRecovery never matches any button from the real Meta ads-consent/subscription flow, even as the only buttons present", async () => {
+  const adsConsentFlowButtons = ["Get started", "Use free of charge with ads", "Continue", "Agree"];
+  for (const label of adsConsentFlowButtons) {
+    const page = makePageWithButtons([label]);
+    const result = await attemptRecovery(page, "COOKIE_CONSENT_REQUIRED");
+    assert.equal(result.performed, false, `"${label}" must never be treated as a safe cookie-consent control`);
+  }
+  // Also never matched when mixed in alongside a real, legitimate cookie
+  // control - the search must not accidentally prefer/match these instead.
+  const page = makePageWithButtons(["Get started", "Use free of charge with ads", "Continue", "Agree", "Decline optional cookies"]);
+  const result = await attemptRecovery(page, "COOKIE_CONSENT_REQUIRED");
+  assert.equal(result.performed, true);
+  assert.match(result.detail, /Decline optional cookies/, "must still find and click only the genuine cookie control, never one of the ads-consent buttons");
+});
+
+test("scraping_warning challenge controls are never clicked even when a page's only buttons look cookie-consent-adjacent", async () => {
+  // SCRAPING_WARNING has no action at all (see the state-gate test above),
+  // but this asserts it independent of that gate too - even a low-level
+  // call with a page full of clickable controls must never act.
+  const page = makePageWithButtons(["I understand", "Continue", "Confirm", "Verify"]);
+  const result = await attemptRecovery(page, "SCRAPING_WARNING");
+  assert.equal(result.performed, false);
 });
 
 test("attemptRecovery reports a click failure without throwing", async () => {
