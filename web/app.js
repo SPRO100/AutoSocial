@@ -2231,12 +2231,14 @@ const UI = {
       `Total ${report.total} - ` +
       `<span style="color:var(--status-good);">${report.successful} ready</span>, ` +
       `<span style="color:var(--status-warn);">${report.needsLogin} need login</span>, ` +
+      (report.challengeRequired ? `<span style="color:var(--status-warn);">${report.challengeRequired} challenge required</span>, ` : "") +
       `<span style="color:var(--status-bad);">${report.failed} failed</span>` +
       (report.skipped ? `, ${report.skipped} skipped (duplicate)` : "");
 
     const statusBadge = (status) => {
       if (status === "READY") return '<span class="status-badge active">READY</span>';
       if (status === "NEEDS_LOGIN") return '<span class="status-badge locked">NEEDS LOGIN</span>';
+      if (status === "CHALLENGE_REQUIRED") return '<span class="status-badge locked">CHALLENGE REQUIRED</span>';
       if (status === "SKIPPED_DUPLICATE") return '<span class="status-badge">SKIPPED</span>';
       return '<span class="status-badge error">FAILED</span>';
     };

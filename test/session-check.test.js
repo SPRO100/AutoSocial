@@ -166,6 +166,26 @@ test("checkSession reports 'needs_login' (never 'ready') for a real Instagram ac
   assert.equal(reloaded.sessionStatus, "needs_login", "preflight/CONTENT-OS must never see a stale/false 'ready' persisted for this account");
 });
 
+test("checkSession persists an Instagram scraping warning as challenge_required, never ready", async () => {
+  const { sessionCheck, accountManager } = await freshSessionCheck({
+    persona: {
+      attachPersonaProfile: async (id) => ({
+        profileId: id, browser: {}, context: {}, info: { port: 1 },
+        page: makeInstagramFakePage("https://www.instagram.com/accounts/scraping_warning/", "Sorry, something went wrong"),
+      }),
+    },
+  });
+  const account = await accountManager.addAccount("challenge-user", { importPlatform: "instagram", importUsername: "challenge-user" });
+  await accountManager.setPersonaProfileId(account.id, "session-check-profile-1");
+
+  const result = await sessionCheck.checkSession(account.id, "instagram");
+  assert.equal(result.sessionStatus, "challenge_required");
+  assert.notEqual(result.sessionStatus, "ready");
+  assert.match(result.reason, /anti-automation|account review/i);
+  const reloaded = await accountManager.getAccountById(account.id);
+  assert.equal(reloaded.sessionStatus, "challenge_required");
+});
+
 test("checkSession reports 'ready' for a real Instagram account on an authenticated shell matching the imported identity", async () => {
   const { sessionCheck, accountManager } = await freshSessionCheck({
     persona: {

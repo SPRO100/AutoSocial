@@ -10,8 +10,10 @@ const { verifyInstagramSession } = require("../src/importers/instagram-verify");
 // doesn't contain that element - never throws just because a selector
 // wasn't explicitly stubbed.
 function makePage({ finalUrl, bodyText = "", hasNav = false, profileHandles = null, gotoError = null }) {
+  let gotoCalls = 0;
   return {
     goto: async () => {
+      gotoCalls += 1;
       if (gotoError) throw gotoError;
     },
     waitForLoadState: async () => {},
@@ -31,8 +33,22 @@ function makePage({ finalUrl, bodyText = "", hasNav = false, profileHandles = nu
         return [];
       },
     }),
+    getGotoCalls: () => gotoCalls,
   };
 }
+
+test("scraping_warning is an explicit challenge and a known challenge URL is not re-navigated", async () => {
+  const page = makePage({
+    finalUrl: "https://www.instagram.com/accounts/scraping_warning/",
+    bodyText: "Sorry, something went wrong",
+  });
+  const result = await verifyInstagramSession(page);
+  assert.equal(result.active, false);
+  assert.equal(result.challenge, true);
+  assert.equal(result.code, "instagram_scraping_warning");
+  assert.match(result.reason, /anti-automation|account review/i);
+  assert.equal(page.getGotoCalls(), 0);
+});
 
 // --- Real production incident: signup redirect was misclassified as active ---
 

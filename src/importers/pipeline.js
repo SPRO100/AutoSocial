@@ -116,7 +116,7 @@ function safeMessage(error) {
 // produced it. Best-effort: a failure to persist status must never fail
 // the import/update itself, which has already completed by this point.
 async function persistSessionStatus(accountId, pipelineStatus, reason) {
-  const map = { READY: "ready", NEEDS_LOGIN: "needs_login", FAILED: "error" };
+  const map = { READY: "ready", NEEDS_LOGIN: "needs_login", CHALLENGE_REQUIRED: "challenge_required", FAILED: "error" };
   const status = map[pipelineStatus];
   if (!status || !accountId) return;
   await accountManager.setSessionStatus(accountId, { status, reason }).catch(() => {});
@@ -232,7 +232,7 @@ async function updateExistingAccountSession(existingAccount, record) {
       session = await persona.attachPersonaProfile(profileId, { headless: true });
       const result = await verifyWithTransientRetry(verify, session.page, record.username);
       sessionLabel = result.active ? "Active" : "Invalid";
-      status = result.active ? "READY" : "NEEDS_LOGIN";
+      status = result.active ? "READY" : (result.challenge ? "CHALLENGE_REQUIRED" : "NEEDS_LOGIN");
       reason = result.active ? null : result.reason;
     } catch (error) {
       sessionLabel = "Unknown";
@@ -530,6 +530,7 @@ async function importBatch(records, { concurrency = DEFAULT_CONCURRENCY, updateS
     total: results.length,
     successful: results.filter((r) => r.status === "READY").length,
     needsLogin: results.filter((r) => r.status === "NEEDS_LOGIN").length,
+    challengeRequired: results.filter((r) => r.status === "CHALLENGE_REQUIRED").length,
     failed: results.filter((r) => r.status === "FAILED").length,
     skipped: results.filter((r) => r.status === "SKIPPED_DUPLICATE").length,
     results,

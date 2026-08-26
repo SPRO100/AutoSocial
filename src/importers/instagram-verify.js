@@ -33,6 +33,14 @@
 
 const GATES = [
   {
+    name: "scraping_warning",
+    code: "instagram_scraping_warning",
+    reason: "Instagram requires account review before continuing (anti-automation check)",
+    url: /\/accounts\/scraping_warning\//i,
+    text: /sorry, something went wrong|automated behavior|scraping warning/i,
+    challenge: true,
+  },
+  {
     name: "login",
     reason: "redirected to login",
     url: /\/accounts\/login/i,
@@ -68,7 +76,12 @@ function matchGate(url, text) {
 
 async function verifyInstagramSession(page, expectedUsername = null) {
   try {
-    await page.goto("https://www.instagram.com/", { waitUntil: "domcontentloaded", timeout: 30000 });
+    // Never amplify a known anti-automation/challenge state with another
+    // forced navigation. The operator/browser must resolve it first.
+    const currentUrl = typeof page.url === "function" ? page.url() : "";
+    if (!/\/accounts\/scraping_warning\//i.test(currentUrl)) {
+      await page.goto("https://www.instagram.com/", { waitUntil: "domcontentloaded", timeout: 30000 });
+    }
     // Give any client-side auth redirect a chance to settle - not fatal if
     // the page never reaches network-idle (some authenticated shells never
     // do, given their own polling/websocket activity).
@@ -87,7 +100,7 @@ async function verifyInstagramSession(page, expectedUsername = null) {
     }
 
     const gate = matchGate(url, text);
-    if (gate) return { active: false, reason: gate.reason };
+    if (gate) return { active: false, challenge: Boolean(gate.challenge), code: gate.code || null, reason: gate.reason };
 
     // Best-effort STRENGTHENING signal, never a hard requirement: Instagram's
     // logged-in home renders a real <nav> landmark; its logged-out landing

@@ -110,7 +110,7 @@ async function checkSessionUnlocked(accountId, requestedPlatform) {
     // Verifiers that don't accept a second argument (TikTok, YouTube, ...)
     // simply ignore it.
     const result = await verify(session.page, account.name || null);
-    sessionStatus = result.active ? "ready" : "needs_login";
+    sessionStatus = result.active ? "ready" : (result.challenge ? "challenge_required" : "needs_login");
     reason = result.active ? null : safeVerifyReason(result.reason);
     // Safe diagnostic observability: account/platform/decision/reason and
     // the real final URL the verifier landed on - never a cookie, token, or

@@ -41,7 +41,7 @@ function normalizeSourceField(value) {
   return trimmed ? trimmed : null;
 }
 
-const SESSION_STATUS_VALUES = new Set(["ready", "needs_login", "unknown", "error"]);
+const SESSION_STATUS_VALUES = new Set(["ready", "needs_login", "challenge_required", "unknown", "error"]);
 const PUBLISH_STATUS_VALUES = new Set(["published", "failed", "unconfirmed"]);
 
 function normalizeEnum(value, allowed) {
