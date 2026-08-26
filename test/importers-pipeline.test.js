@@ -360,7 +360,7 @@ test("concurrency option bounds how many Persona attach operations are in flight
 test("a batch-level report always includes total/successful/needsLogin/failed and a full per-account results array", async () => {
   const { pipeline } = await freshPipeline({ sessionUrl: ACTIVE_URL });
   const report = await pipeline.importBatch([tiktokRecord("account-report")]);
-  assert.deepEqual(Object.keys(report).sort(), ["failed", "needsLogin", "results", "skipped", "successful", "total"]);
+  assert.deepEqual(Object.keys(report).sort(), ["challengeRequired", "failed", "needsLogin", "results", "skipped", "successful", "total"]);
   assert.equal(Array.isArray(report.results), true);
 });
 
