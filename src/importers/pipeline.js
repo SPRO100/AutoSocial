@@ -420,7 +420,7 @@ async function processRecord(record, updateSessionKeys) {
       session = await persona.attachPersonaProfile(profileId, { headless: true });
       const result = await verifyWithTransientRetry(verify, session.page, record.username);
       sessionLabel = result.active ? "Active" : "Invalid";
-      status = result.active ? "READY" : "NEEDS_LOGIN";
+      status = result.active ? "READY" : (result.challenge ? "CHALLENGE_REQUIRED" : "NEEDS_LOGIN");
       reason = result.active ? null : result.reason;
     } catch (error) {
       sessionLabel = "Unknown";

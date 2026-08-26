@@ -364,6 +364,66 @@ test("a batch-level report always includes total/successful/needsLogin/failed an
   assert.equal(Array.isArray(report.results), true);
 });
 
+// --- Real production gap (2026-08-26): the Instagram scraping_warning
+// anti-automation challenge was already classified as CHALLENGE_REQUIRED
+// for "Update Session" (updateExistingAccountSession), but the main,
+// brand-new-import path (processRecord, exercised here via importBatch)
+// still degraded the exact same gate to a generic NEEDS_LOGIN. See ubt-os's
+// docs/adr/0030-security-challenge-states-fail-closed.md - a challenge must
+// never be silently merged into NEEDS_LOGIN on ANY import path. -----------
+
+function instagramRecord(username, overrides = {}) {
+  return { platform: "instagram", username, password: "pw", ...overrides };
+}
+
+const SCRAPING_WARNING_URL = "https://www.instagram.com/accounts/scraping_warning/";
+
+test("processRecord (brand-new import) classifies an Instagram scraping_warning challenge as CHALLENGE_REQUIRED, never NEEDS_LOGIN", async () => {
+  const { pipeline, accountManager } = await freshPipeline({ sessionUrl: SCRAPING_WARNING_URL });
+  const report = await pipeline.importBatch([instagramRecord("challenge-user")]);
+
+  assert.equal(report.results[0].status, "CHALLENGE_REQUIRED");
+  assert.notEqual(report.results[0].status, "NEEDS_LOGIN");
+  assert.equal(report.challengeRequired, 1);
+  assert.equal(report.needsLogin, 0);
+
+  const accountId = report.results[0].accountId;
+  const account = await accountManager.getAccountById(accountId);
+  assert.equal(account.sessionStatus, "challenge_required", "the persisted account record must reflect the same first-class state, not a plain needs_login");
+});
+
+test("updateExistingAccountSession also classifies a scraping_warning challenge as CHALLENGE_REQUIRED (regression lock for the path already fixed)", async () => {
+  // A single fake Persona whose attach returns a genuinely authenticated
+  // page for the first (brand-new-import) call, then the scraping_warning
+  // challenge page for every later call - simulates the account going
+  // READY -> CHALLENGE_REQUIRED between the initial import and a later
+  // Update Session, without ever touching two separate account-manager
+  // state files.
+  const INSTAGRAM_ACTIVE_URL = "https://www.instagram.com/";
+  let attachCount = 0;
+  const { pipeline, accountManager } = await freshPipeline({
+    persona: {
+      attachPersonaProfile: async (profileId) => {
+        attachCount += 1;
+        const url = attachCount === 1 ? INSTAGRAM_ACTIVE_URL : SCRAPING_WARNING_URL;
+        return { profileId, page: makeFakePage(url), browser: {}, context: {}, info: { port: 1 } };
+      },
+    },
+  });
+
+  const first = await pipeline.importBatch([instagramRecord("update-challenge-user")]);
+  assert.equal(first.results[0].status, "READY");
+  const accountId = first.results[0].accountId;
+
+  const key = "instagram:update-challenge-user";
+  const second = await pipeline.importBatch([instagramRecord("update-challenge-user")], { updateSessionKeys: [key] });
+
+  assert.equal(second.results[0].status, "CHALLENGE_REQUIRED");
+  assert.notEqual(second.results[0].status, "NEEDS_LOGIN");
+  const account = await accountManager.getAccountById(accountId);
+  assert.equal(account.sessionStatus, "challenge_required");
+});
+
 test("no result object emitted by importBatch ever contains a raw password or cookie value", async () => {
   const { pipeline } = await freshPipeline({ sessionUrl: ACTIVE_URL });
   const report = await pipeline.importBatch([
