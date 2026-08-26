@@ -38,6 +38,7 @@ const {
   clearPersonaProfileId,
   getPersonaProfileId,
   hasSavedPlatformSession,
+  setPublishStatus,
   PLATFORMS,
 } = require("./account-manager");
 const {
@@ -522,10 +523,16 @@ async function createServer() {
         : platform === "youtube"
           ? await youtubeUploader.uploadVideo({ videoPath: tempPath, caption, accountId })
           : await getBrowserAdapter(platform).publish({ accountId, text: caption, mediaPaths: hasMedia ? [tempPath] : [], publicationType: publicationType.toUpperCase() });
-      if (!result.ok) return res.status(400).json({ ok: false, finalStatus: "failed", code: "BROWSER_PUBLISH_FAILED", phase: "browser", error: result.error, diagnosticArtifact: result.screenshotPath, safeToRetry: true, externalActionStarted: false, postClick: false });
-      return res.json({ ok: true, finalStatus: "published", platform, publicationType, accountId, externalActionStarted: true, postClick: true, safeToRetry: false, remotePostId: null, remotePostUrl: null });
+      if (!result.ok) {
+        const finalStatus = result.externalActionStarted ? "unconfirmed" : "failed";
+        await setPublishStatus(accountId, { status: finalStatus, reason: result.error }).catch(() => {});
+        return res.status(result.externalActionStarted ? 500 : 400).json({ ok: false, finalStatus, code: result.externalActionStarted ? "BROWSER_PUBLISH_UNCONFIRMED" : "BROWSER_PUBLISH_FAILED", phase: result.phase, error: result.error, diagnosticArtifact: result.screenshotPath, safeToRetry: !result.externalActionStarted, externalActionStarted: Boolean(result.externalActionStarted), postClick: Boolean(result.postClick), navigationStarted: Boolean(result.navigationStarted), mediaUploadStarted: Boolean(result.mediaUploadStarted) });
+      }
+      await setPublishStatus(accountId, { status: "published" }).catch(() => {});
+      return res.json({ ok: true, finalStatus: "published", platform, publicationType, accountId, phase: result.phase, externalActionStarted: true, postClick: true, safeToRetry: false, remotePostId: null, remotePostUrl: null });
     } catch (error) {
-      return res.status(500).json({ ok: false, finalStatus: "unconfirmed", code: "BROWSER_PUBLISH_UNCONFIRMED", phase: "browser", error: error.message, safeToRetry: false, externalActionStarted: true, postClick: true });
+      await setPublishStatus(accountId, { status: "failed", reason: error.message }).catch(() => {});
+      return res.status(500).json({ ok: false, finalStatus: "failed", code: "BROWSER_PUBLISH_FAILED", phase: "SESSION_ACQUIRE", error: error.message, safeToRetry: true, externalActionStarted: false, postClick: false });
     } finally {
       accountLock.unlock(accountId);
       await fs.rm(tempPath, { force: true }).catch(() => {});

@@ -321,23 +321,45 @@ async function waitForPostConfirmation(page, startedUrl) {
 
 async function uploadMedia({ mediaPaths, caption, accountId, publicationType = "video" }) {
   const absoluteMediaPaths = (Array.isArray(mediaPaths) ? mediaPaths : [mediaPaths]).map((file) => path.resolve(file));
-  const session = await openBrowserSession(accountId);
-  const { page } = session;
+  let session = null;
+  const telemetry = {
+    phase: "SESSION_ACQUIRE",
+    attempt: 1,
+    externalActionStarted: false,
+    postClick: false,
+    navigationStarted: false,
+    mediaUploadStarted: false,
+  };
   let closeHoldMs = 0;
 
   try {
+    session = await openBrowserSession(accountId);
+    const { page } = session;
+    telemetry.phase = "NAVIGATION";
+    telemetry.navigationStarted = true;
     await gotoUploadPage(page);
+    telemetry.phase = "MEDIA_UPLOAD";
+    telemetry.mediaUploadStarted = true;
     await setMediaFiles(page, absoluteMediaPaths);
     await page.waitForTimeout(Math.max(config.postDelayMs, 5000));
     await clickNextButtons(page);
+    telemetry.phase = "CAPTION_ENTRY";
     await setCaption(page, caption || config.defaultCaption);
 
     const startedUrl = page.url();
+    telemetry.phase = "PRE_PUBLISH";
     const shared = await clickShare(page);
     if (!shared) {
       throw new Error("Could not find/click Instagram Share button.");
     }
+    // The click is the irreversible external-action boundary. Everything
+    // before it (including selecting a local file in the browser) is safe to
+    // retry and must remain explicitly false in telemetry.
+    telemetry.phase = "POST_CLICK";
+    telemetry.externalActionStarted = true;
+    telemetry.postClick = true;
 
+    telemetry.phase = "POST_CONFIRMATION";
     const confirmation = await waitForPostConfirmation(page, startedUrl);
     if (!confirmation.ok) {
       throw new Error(confirmation.reason);
@@ -351,26 +373,27 @@ async function uploadMedia({ mediaPaths, caption, accountId, publicationType = "
 
     // Hold the browser open so background processing finishes
     closeHoldMs = Math.max(config.postPublishHoldMs || 15000, 15000);
-    return { ok: true, publicationType };
+    return { ok: true, publicationType, ...telemetry };
   } catch (error) {
     const screenshotPath = path.resolve(
       config.projectRoot,
       "last-instagram-upload-error.png"
     );
-    await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => { });
+    if (session?.page) await session.page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => { });
 
     closeHoldMs = Math.max(config.failureHoldMs, 0);
     return {
       ok: false,
       error: error.message,
       screenshotPath,
+      ...telemetry,
     };
   } finally {
     if (closeHoldMs > 0) {
       console.log(`Holding browser for ${closeHoldMs / 1000}s before closing...`);
-      await page.waitForTimeout(closeHoldMs).catch(() => { });
+      await session?.page?.waitForTimeout(closeHoldMs).catch(() => { });
     }
-    await session.disconnect();
+    if (session) await session.disconnect();
   }
 }
 
