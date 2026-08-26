@@ -677,7 +677,11 @@ async function createServer() {
           error: "This file's format was not recognized by any supported supplier adapter.",
         });
       }
-      const { records, errors, ignoredMetadata = 0, classifications = null } = supplier.parse(content);
+      // hintedPlatform is passed through as a second argument - every
+      // existing platform-specific adapter's parse(text) ignores extra
+      // arguments; only the generic credentials-auto adapter (which has no
+      // platform signal of its own) reads it.
+      const { records, errors, ignoredMetadata = 0, classifications = null } = supplier.parse(content, hintedPlatform);
       if (!records.length) {
         return res.status(400).json({
           ok: false,

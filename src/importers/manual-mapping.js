@@ -1,22 +1,54 @@
 const { createRecord, toSafePreview } = require("./normalize");
+const { splitDelimited } = require("./tokenizer");
+const { isCookieBundle, isEmail, isUserAgent, isTotp } = require("./field-detect");
 
 function lines(text) { return String(text || "").replace(/^\uFEFF/, "").split(/\r?\n/).map((line, i) => ({ line: line.trim(), lineNumber: i + 1 })).filter(({ line }) => line && !line.startsWith("#")); }
+// Bracket-safe (see ../tokenizer.js) - a JSON cookie bundle's internal
+// commas/colons never inflate the row's apparent column count here, which
+// is what used to turn a supplier file with a JSON cookie column into a
+// dozen bogus "Column N" entries in the manual-mapping review UI.
 function detectDelimiter(text) {
   const rows = lines(text).slice(0, 20).map((x) => x.line);
   const candidates = ["|", "\t", ";", ",", ":"];
-  return candidates.map((delimiter) => ({ delimiter, score: rows.reduce((n, row) => n + (row.split(delimiter).length > 1 ? 1 : 0), 0) })).sort((a, b) => b.score - a.score)[0]?.delimiter || "|";
+  return candidates.map((delimiter) => ({ delimiter, score: rows.reduce((n, row) => n + (splitDelimited(row, delimiter).length > 1 ? 1 : 0), 0) })).sort((a, b) => b.score - a.score)[0]?.delimiter || "|";
 }
 function splitRow(row, delimiter, cookieIndex) {
   if (delimiter === "whitespace") return row.trim().split(/\s+/);
-  const parts = row.split(delimiter);
-  if (cookieIndex === undefined || cookieIndex < 0 || cookieIndex >= parts.length - 1) return parts.map((x) => x.trim());
-  return [...parts.slice(0, cookieIndex), parts.slice(cookieIndex).join(delimiter)].map((x) => x.trim());
+  const parts = splitDelimited(row, delimiter);
+  if (cookieIndex === undefined || cookieIndex < 0 || cookieIndex >= parts.length - 1) return parts;
+  return [...parts.slice(0, cookieIndex), parts.slice(cookieIndex).join(delimiter)];
 }
 function mask(value) { if (!value) return null; const s = String(value); return s.length <= 2 ? "**" : `${s.slice(0, 1)}${"*".repeat(Math.min(8, s.length - 1))}`; }
 function validLogin(value) { return /^@?[A-Za-z0-9][A-Za-z0-9._+@-]{1,127}$/.test(String(value || "").trim()); }
+
+// Pre-fills the review UI's field selectors from the SHAPE of each column's
+// sample values, so the operator confirms a suggestion instead of guessing
+// column indexes blind - in particular, the cookie column (almost always
+// the one carrying a JSON bundle or a long header-style string) no longer
+// has to be found by trial and error. Never overrides a column already
+// claimed by an earlier, higher-priority field.
+function suggestFieldMapping(rawRows, columns) {
+  const sampleOf = (col) => rawRows.map((values) => values[col]).filter(Boolean);
+  const ratioOf = (predicate, col) => { const values = sampleOf(col); return values.length ? values.filter(predicate).length / values.length : 0; };
+  const fields = {};
+  const assign = (name, predicate, threshold = 0.8) => {
+    for (let c = 0; c < columns; c += 1) {
+      if (Object.values(fields).includes(c)) continue;
+      if (ratioOf(predicate, c) >= threshold) { fields[name] = c; return; }
+    }
+  };
+  assign("cookie", isCookieBundle);
+  assign("email", isEmail);
+  assign("userAgent", isUserAgent);
+  assign("twoFactorSecret", isTotp);
+  return fields;
+}
+
 function suggest(content, platform) {
   const delimiter = detectDelimiter(content); const rows = lines(content).slice(0, 8);
-  return { platform, delimiter: delimiter === "\t" ? "TAB" : delimiter, columns: Math.max(0, ...rows.map(({ line }) => line.split(delimiter).length)), rows: rows.map(({ line, lineNumber }) => ({ lineNumber, values: splitRow(line, delimiter).map(mask) })) };
+  const rawRows = rows.map(({ line }) => splitRow(line, delimiter));
+  const columns = Math.max(0, ...rawRows.map((values) => values.length));
+  return { platform, delimiter: delimiter === "\t" ? "TAB" : delimiter, columns, rows: rows.map(({ lineNumber }, i) => ({ lineNumber, values: rawRows[i].map(mask) })), fields: suggestFieldMapping(rawRows, columns) };
 }
 function parse(content, platform, mapping) {
   const delimiter = mapping.delimiter === "TAB" ? "\t" : mapping.delimiter;

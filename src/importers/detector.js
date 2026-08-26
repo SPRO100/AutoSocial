@@ -8,15 +8,26 @@ const tiktokPipe7 = require("./suppliers/tiktok-pipe7");
 const csv = require("./suppliers/csv");
 const instagramColon = require("./suppliers/instagram-colon");
 const youtubeSupplier = require("./suppliers/youtube-supplier");
+const credentialsAuto = require("./suppliers/credentials-auto");
 
-const SUPPLIERS = [csv, tiktokPipe7, instagramColon, youtubeSupplier];
+// Registration order also breaks ties when two adapters score equally
+// (Array#sort is stable) - the more specific/structural adapters
+// (instagram-colon, tiktok-pipe7, youtube-supplier) are listed before the
+// generic ones (csv, credentials-auto) so a file that could plausibly match
+// either prefers the platform-specific parser.
+const SUPPLIERS = [instagramColon, tiktokPipe7, youtubeSupplier, csv, credentialsAuto];
 
 // Returns the first matching adapter, or null if nothing recognizes the
 // file. Order matters only if two adapters could both match the same text;
 // registered suppliers should keep their test() conservative enough that
 // this stays a non-issue.
 function detectFormat(text, { platform } = {}) {
-  const candidates = SUPPLIERS.filter((supplier) => !platform || supplier.id.includes(String(platform).toLowerCase()) || supplier.id === "generic-csv-v1");
+  // Platform-agnostic adapters (csv.js, credentials-auto.js) are marked
+  // `generic: true` and are always considered regardless of a platform
+  // hint - they determine (or are told) the platform from the file/caller
+  // itself rather than from their own id, unlike a platform-specific
+  // adapter such as instagram-colon-v1.
+  const candidates = SUPPLIERS.filter((supplier) => !platform || supplier.generic || supplier.id.includes(String(platform).toLowerCase()));
   const scored = candidates.map((supplier) => ({ supplier, score: typeof supplier.score === "function" ? supplier.score(text) : { validRows: supplier.test(text) ? 1 : 0, confidence: "MEDIUM" } })).filter(({ score }) => score.validRows > 0);
   scored.sort((a, b) => b.score.validRows - a.score.validRows);
   return scored[0]?.supplier || null;

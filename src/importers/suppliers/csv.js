@@ -44,4 +44,4 @@ function parse(text) {
   return { records, errors };
 }
 
-module.exports = { id: ID, test, parse };
+module.exports = { id: ID, generic: true, test, parse };
