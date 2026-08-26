@@ -43,6 +43,68 @@ function normalizeSourceField(value) {
 
 const SESSION_STATUS_VALUES = new Set(["ready", "needs_login", "challenge_required", "unknown", "error"]);
 const PUBLISH_STATUS_VALUES = new Set(["published", "failed", "unconfirmed"]);
+// Granular Session Recovery Pipeline state - see
+// importers/instagram-verify.js's STATES (the authoritative definition;
+// this is a mirrored validation allowlist, same pattern as the two enums
+// above) and session-recovery.js (the orchestrator that produces these).
+// Coarser than the values above only in one direction: every one of these
+// maps to exactly one SESSION_STATUS_VALUES entry (see
+// session-recovery.js#mapToSessionStatus), never the reverse.
+const SESSION_STATE_VALUES = new Set([
+  "READY",
+  "COOKIE_CONSENT_REQUIRED",
+  "PRIVACY_CHOICE_REQUIRED",
+  "SCRAPING_WARNING",
+  "SECURITY_CHALLENGE",
+  "TWO_FACTOR_REQUIRED",
+  "CAPTCHA_REQUIRED",
+  "LOGIN_REQUIRED",
+  "REDIRECT_LOOP",
+  "SESSION_EXPIRED",
+  "RECOVERY_RETRYABLE",
+  "RECOVERY_EXHAUSTED",
+  "FAILED",
+]);
+// Bounded so a account's history can never grow unbounded across repeated
+// checks/recoveries - only the most recent run's attempts are operationally
+// useful.
+const MAX_RECOVERY_ATTEMPTS_STORED = 10;
+
+// Strict allowlist of fields, each independently sanitized with the same
+// normalizeSafeText/normalizeIsoTimestamp helpers already used for every
+// other free-text account field - defense in depth: even if a future caller
+// misused this (session-recovery.js's own contract never puts a cookie/
+// password/2FA value in an attempt object), nothing outside this allowlist
+// can ever reach disk or the API.
+function normalizeRecoveryAttempt(item) {
+  if (!item || typeof item !== "object") return null;
+  const attempt = {};
+  if (typeof item.attempt === "number" && Number.isFinite(item.attempt)) attempt.attempt = item.attempt;
+  const state = normalizeSafeText(item.state, 60);
+  if (state) attempt.state = state;
+  const url = normalizeSafeText(item.url, 300);
+  if (url) attempt.url = url;
+  const action = normalizeSafeText(item.action, 60);
+  if (action) attempt.action = action;
+  if (typeof item.actionPerformed === "boolean") attempt.actionPerformed = item.actionPerformed;
+  const actionDetail = normalizeSafeText(item.actionDetail, 200);
+  if (actionDetail) attempt.actionDetail = actionDetail;
+  const result = normalizeSafeText(item.result, 60);
+  if (result) attempt.result = result;
+  const reason = normalizeSafeText(item.reason, 300);
+  if (reason) attempt.reason = reason;
+  const timestamp = normalizeIsoTimestamp(item.timestamp);
+  if (timestamp) attempt.timestamp = timestamp;
+  const nextAction = normalizeSafeText(item.nextAction, 200);
+  if (nextAction) attempt.nextAction = nextAction;
+  return attempt;
+}
+function normalizeRecoveryAttempts(value) {
+  if (!Array.isArray(value)) return null;
+  const normalized = value.map(normalizeRecoveryAttempt).filter(Boolean);
+  if (!normalized.length) return null;
+  return normalized.slice(-MAX_RECOVERY_ATTEMPTS_STORED);
+}
 
 function normalizeEnum(value, allowed) {
   return typeof value === "string" && allowed.has(value) ? value : null;
@@ -90,6 +152,14 @@ function normalizeAccount(item) {
   if (sessionCheckedAt) account.sessionCheckedAt = sessionCheckedAt;
   const sessionReason = normalizeSafeText(item.sessionReason);
   if (sessionReason) account.sessionReason = sessionReason;
+  // Granular Session Recovery Pipeline record - see SESSION_STATE_VALUES
+  // above. Additive to sessionStatus, never a replacement for it: every
+  // consumer that only knows the five coarse values keeps working
+  // unchanged.
+  const sessionState = normalizeEnum(item.sessionState, SESSION_STATE_VALUES);
+  if (sessionState) account.sessionState = sessionState;
+  const sessionRecoveryAttempts = normalizeRecoveryAttempts(item.sessionRecoveryAttempts);
+  if (sessionRecoveryAttempts) account.sessionRecoveryAttempts = sessionRecoveryAttempts;
 
   const lastPublishStatus = normalizeEnum(item.lastPublishStatus, PUBLISH_STATUS_VALUES);
   if (lastPublishStatus) account.lastPublishStatus = lastPublishStatus;
@@ -371,7 +441,7 @@ async function clearPersonaProfileId(accountId) {
 // token - see normalizeSafeText's contract above; callers must already
 // have sanitized any free text before calling these.
 
-async function setSessionStatus(accountId, { status, reason, checkedAt } = {}) {
+async function setSessionStatus(accountId, { status, reason, checkedAt, state: sessionState, attempts } = {}) {
   await ensureLoaded();
   const target = state.accounts.find((item) => item.id === accountId);
   if (!target) {
@@ -385,6 +455,16 @@ async function setSessionStatus(accountId, { status, reason, checkedAt } = {}) {
   const safeReason = normalizeSafeText(reason);
   if (safeReason) target.sessionReason = safeReason;
   else delete target.sessionReason;
+  // Optional, additive granular Session Recovery Pipeline record - see
+  // SESSION_STATE_VALUES above. A caller that omits these (every pre-
+  // existing caller: TikTok's verify path, manual Check Session before this
+  // milestone) leaves them exactly as they were, never clearing a
+  // previously-recorded one just because this particular call didn't have
+  // it.
+  const normalizedState = normalizeEnum(sessionState, SESSION_STATE_VALUES);
+  if (normalizedState) target.sessionState = normalizedState;
+  const normalizedAttempts = normalizeRecoveryAttempts(attempts);
+  if (normalizedAttempts) target.sessionRecoveryAttempts = normalizedAttempts;
   await saveState();
   return clone(target);
 }

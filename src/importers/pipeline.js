@@ -20,6 +20,7 @@ const persona = require("../persona-browser");
 const { toSafePreview, duplicateKey } = require("./normalize");
 const { toPersonaCookiePayload } = require("./cookie-adapter");
 const credentialVault = require("../security/credential-vault");
+const { recoverSession, mapToPipelineStatus, mapToSessionStatus } = require("../session-recovery");
 
 const DEFAULT_CONCURRENCY = 2;
 // A hard ceiling regardless of what a caller requests - importBatch is
@@ -49,14 +50,25 @@ const VERIFIERS = {
   instagram: require("./instagram-verify").verifyInstagramSession,
 };
 
-async function verifyWithTransientRetry(verify, page, username) {
-  let result = await verify(page, username);
+// Platform recovery modules - see ../session-recovery.js's contract comment.
+// Only Instagram has one: TikTok/YouTube verifiers never produce a
+// `state`/`recoverable` field, so recoverSession() below treats them as
+// having no recoverable states and returns after exactly one verify call,
+// identical in cost and behavior to calling `verify` directly (see that
+// module's legacy-compatible status mapping for why this never changes
+// TikTok's own classification either).
+const RECOVERERS = {
+  instagram: require("./instagram-recovery"),
+};
+
+async function verifyWithTransientRetry(verify, page, username, options) {
+  let result = await verify(page, username, options);
   // A freshly imported Persona cookie jar can expose the authenticated shell
   // before Instagram's identity links finish hydrating. Retry only that
   // specific, non-destructive diagnostic; never weaken identity checking.
   if (!result.active && /identity did not match|identity marker/i.test(String(result.reason || ""))) {
     await new Promise((resolve) => setTimeout(resolve, VERIFY_RETRY_DELAY_MS));
-    result = await verify(page, username);
+    result = await verify(page, username, options);
   }
   return result;
 }
@@ -115,11 +127,15 @@ function safeMessage(error) {
 // regardless of which flow (new import, Update Session, or a manual check)
 // produced it. Best-effort: a failure to persist status must never fail
 // the import/update itself, which has already completed by this point.
-async function persistSessionStatus(accountId, pipelineStatus, reason) {
+async function persistSessionStatus(accountId, pipelineStatus, reason, { state = null, attempts = null } = {}) {
   const map = { READY: "ready", NEEDS_LOGIN: "needs_login", CHALLENGE_REQUIRED: "challenge_required", FAILED: "error" };
   const status = map[pipelineStatus];
   if (!status || !accountId) return;
-  await accountManager.setSessionStatus(accountId, { status, reason }).catch(() => {});
+  // state/attempts are the Session Recovery Pipeline's granular record -
+  // see session-recovery.js. Both optional and additive: a caller with no
+  // recovery data (e.g. a platform with no recoverable states) persists
+  // exactly the same two fields this function always has.
+  await accountManager.setSessionStatus(accountId, { status, reason, state, attempts }).catch(() => {});
 }
 
 async function rollback({ accountId, profileId }) {
@@ -222,18 +238,39 @@ async function updateExistingAccountSession(existingAccount, record) {
   }
 
   const verify = VERIFIERS[record.platform];
+  const recover = RECOVERERS[record.platform];
   let sessionLabel = "Skipped (verification not implemented for this platform)";
   let status = "FAILED";
   let reason = verify ? null : `no session verifier is implemented for platform "${record.platform}"`;
+  let sessionState = null;
+  let recoveryAttempts = null;
 
   if (verify) {
     let session = null;
     try {
       session = await persona.attachPersonaProfile(profileId, { headless: true });
-      const result = await verifyWithTransientRetry(verify, session.page, record.username);
-      sessionLabel = result.active ? "Active" : "Invalid";
-      status = result.active ? "READY" : (result.challenge ? "CHALLENGE_REQUIRED" : "NEEDS_LOGIN");
-      reason = result.active ? null : result.reason;
+      // recoverSession runs verify, and - only for a SAFE, recognized state
+      // (see instagram-recovery.js's SAFE_RECOVERABLE_STATES) - a bounded
+      // number of automated recovery actions before settling on a final,
+      // terminal classification. Every other outcome (security challenge,
+      // 2FA, CAPTCHA, an account-wide privacy/subscription choice, a
+      // detected redirect loop, or budget exhaustion) is returned exactly
+      // as instagram-verify.js classified it - never retried further,
+      // never guessed into READY.
+      const outcome = await recoverSession({
+        verify: (page, username, opts) => verifyWithTransientRetry(verify, page, username, opts),
+        recover,
+        page: session.page,
+        username: record.username,
+        account: accountId,
+        platform: record.platform,
+        personaProfileId: profileId,
+      });
+      sessionLabel = outcome.active ? "Active" : "Invalid";
+      status = mapToPipelineStatus(outcome);
+      reason = outcome.active ? null : outcome.reason;
+      sessionState = outcome.state || null;
+      recoveryAttempts = outcome.attempts || null;
     } catch (error) {
       sessionLabel = "Unknown";
       status = "FAILED";
@@ -244,7 +281,7 @@ async function updateExistingAccountSession(existingAccount, record) {
       }
       await persona.stopPersonaProfile(profileId).catch(() => {});
     }
-    await persistSessionStatus(accountId, status, reason);
+    await persistSessionStatus(accountId, status, reason, { state: sessionState, attempts: recoveryAttempts });
   }
 
   return {
@@ -257,6 +294,7 @@ async function updateExistingAccountSession(existingAccount, record) {
     session: sessionLabel,
     status,
     reason,
+    sessionState,
   };
 }
 
@@ -410,18 +448,33 @@ async function processRecord(record, updateSessionKeys) {
   // cookies are a coherent, worthwhile artifact - failures no longer roll
   // back (see module comment).
   const verify = VERIFIERS[record.platform];
+  const recover = RECOVERERS[record.platform];
   let sessionLabel = "Skipped (verification not implemented for this platform)";
   let status = "FAILED";
   let reason = verify ? null : `no session verifier is implemented for platform "${record.platform}"`;
+  let sessionState = null;
+  let recoveryAttempts = null;
 
   if (verify) {
     let session = null;
     try {
       session = await persona.attachPersonaProfile(profileId, { headless: true });
-      const result = await verifyWithTransientRetry(verify, session.page, record.username);
-      sessionLabel = result.active ? "Active" : "Invalid";
-      status = result.active ? "READY" : (result.challenge ? "CHALLENGE_REQUIRED" : "NEEDS_LOGIN");
-      reason = result.active ? null : result.reason;
+      // See the matching comment in updateExistingAccountSession above -
+      // same bounded, fail-closed Session Recovery Pipeline, same contract.
+      const outcome = await recoverSession({
+        verify: (page, username, opts) => verifyWithTransientRetry(verify, page, username, opts),
+        recover,
+        page: session.page,
+        username: record.username,
+        account: accountId,
+        platform: record.platform,
+        personaProfileId: profileId,
+      });
+      sessionLabel = outcome.active ? "Active" : "Invalid";
+      status = mapToPipelineStatus(outcome);
+      reason = outcome.active ? null : outcome.reason;
+      sessionState = outcome.state || null;
+      recoveryAttempts = outcome.attempts || null;
     } catch (error) {
       sessionLabel = "Unknown";
       status = "FAILED";
@@ -432,7 +485,7 @@ async function processRecord(record, updateSessionKeys) {
       }
       await persona.stopPersonaProfile(profileId).catch(() => {});
     }
-    await persistSessionStatus(accountId, status, reason);
+    await persistSessionStatus(accountId, status, reason, { state: sessionState, attempts: recoveryAttempts });
   }
 
   return {
@@ -445,6 +498,7 @@ async function processRecord(record, updateSessionKeys) {
     session: sessionLabel,
     status,
     reason,
+    sessionState,
   };
 }
 

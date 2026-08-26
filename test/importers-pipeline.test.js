@@ -816,3 +816,125 @@ test("Update Session persists the refreshed sessionStatus onto the account after
   assert.equal(reloaded.sessionStatus, "ready");
   assert.ok(reloaded.sessionCheckedAt);
 });
+
+// --- Session Recovery Pipeline, end to end through the real pipeline -----
+// (importers/instagram-verify.js + importers/instagram-recovery.js +
+// session-recovery.js, all real - only Persona/the browser page are faked).
+
+const COOKIE_CONSENT_URL = "https://www.instagram.com/consent/?flow=user_cookie_choice_v2";
+const PRIVACY_CHOICE_URL = "https://www.instagram.com/consent/?flow=ad_free_subscription_blocking_flow";
+const INSTAGRAM_HOME_URL = "https://www.instagram.com/";
+
+// A stateful fake Instagram page: starts on a consent screen with a
+// recognizable button, and "navigates" to an authenticated home page only
+// when instagram-recovery.js's real button-search-and-click logic finds and
+// clicks a matching button - exercising the REAL recovery action, not a
+// mocked one.
+function makeRecoverableInstagramPage({ initialUrl, afterClickUrl = INSTAGRAM_HOME_URL, buttonTexts = ["Allow all cookies", "Decline optional cookies"] }) {
+  let currentUrl = initialUrl;
+  return {
+    goto: async () => {},
+    waitForLoadState: async () => {},
+    url: () => currentUrl,
+    locator: (selector) => {
+      if (selector === "body") return { innerText: async () => "" };
+      if (selector === "nav") return { count: async () => (currentUrl === afterClickUrl ? 1 : 0) };
+      if (selector === 'a[href^="/"]') return { evaluateAll: async () => [] };
+      if (selector === 'button, [role="button"], a') {
+        const texts = currentUrl === initialUrl ? buttonTexts : [];
+        return {
+          count: async () => texts.length,
+          nth: (i) => ({
+            innerText: async () => texts[i],
+            click: async () => { currentUrl = afterClickUrl; },
+          }),
+        };
+      }
+      return { count: async () => 0, innerText: async () => "", evaluateAll: async () => [] };
+    },
+  };
+}
+
+test("real production scenario (2026-08-26): cookie consent is auto-recovered to READY through a brand-new import", async () => {
+  const { pipeline, accountManager } = await freshPipeline({
+    persona: {
+      attachPersonaProfile: async (profileId) => ({
+        profileId, browser: {}, context: {}, info: { port: 1 },
+        page: makeRecoverableInstagramPage({ initialUrl: COOKIE_CONSENT_URL }),
+      }),
+    },
+  });
+  const report = await pipeline.importBatch([instagramRecord("cookie-recovery-user")]);
+  const [result] = report.results;
+
+  assert.equal(result.status, "READY");
+  assert.equal(result.sessionState, "READY");
+
+  const account = await accountManager.getAccountById(result.accountId);
+  assert.equal(account.sessionStatus, "ready");
+  assert.equal(account.sessionState, "READY");
+  assert.ok(Array.isArray(account.sessionRecoveryAttempts));
+  assert.ok(account.sessionRecoveryAttempts.length >= 2, "expects at least the initial COOKIE_CONSENT_REQUIRED attempt plus the READY re-verify");
+  assert.equal(account.sessionRecoveryAttempts[0].state, "COOKIE_CONSENT_REQUIRED");
+  assert.equal(account.sessionRecoveryAttempts[0].actionPerformed, true);
+  assert.equal(account.sessionRecoveryAttempts.at(-1).result, "READY");
+  // Never a raw secret anywhere in the persisted, safe attempt history.
+  const serialized = JSON.stringify(account.sessionRecoveryAttempts);
+  assert.equal(serialized.toLowerCase().includes("sessionid="), false);
+  assert.equal(serialized.toLowerCase().includes("password"), false);
+});
+
+test("real production scenario (2026-08-26): privacy/subscription choice stops fail-closed, never auto-decided", async () => {
+  const { pipeline, accountManager } = await freshPipeline({
+    persona: {
+      attachPersonaProfile: async (profileId) => ({
+        profileId, browser: {}, context: {}, info: { port: 1 },
+        page: makeRecoverableInstagramPage({ initialUrl: PRIVACY_CHOICE_URL, buttonTexts: ["Continue without subscribing", "Subscribe"] }),
+      }),
+    },
+  });
+  const report = await pipeline.importBatch([instagramRecord("privacy-choice-user")]);
+  const [result] = report.results;
+
+  assert.equal(result.status, "CHALLENGE_REQUIRED");
+  assert.equal(result.sessionState, "PRIVACY_CHOICE_REQUIRED");
+  assert.match(result.reason, /privacy|subscription/i);
+
+  const account = await accountManager.getAccountById(result.accountId);
+  assert.equal(account.sessionStatus, "challenge_required");
+  assert.equal(account.sessionState, "PRIVACY_CHOICE_REQUIRED");
+});
+
+test("batch isolation: one account stuck on a policy decision does not block another account's successful recovery in the same batch", async () => {
+  const { pipeline, accountManager, fakePersona } = await freshPipeline();
+  // Decide the fake page by the PROFILE'S NAME (which pipeline.js sets to
+  // `autosocial-${platform}-${username}` - see processRecord), never by
+  // call order or profile id, since importBatch's concurrent workers give
+  // no ordering guarantee for which account's attach resolves first.
+  fakePersona.attachPersonaProfile = async (profileId) => {
+    const profiles = await fakePersona.listPersonaProfiles();
+    const profile = profiles.find((p) => p.id === profileId);
+    const isRecoverable = Boolean(profile && profile.name && profile.name.includes("batch-recoverable"));
+    const page = isRecoverable
+      ? makeRecoverableInstagramPage({ initialUrl: COOKIE_CONSENT_URL })
+      : makeRecoverableInstagramPage({ initialUrl: PRIVACY_CHOICE_URL, buttonTexts: ["Subscribe"] });
+    return { profileId, browser: {}, context: {}, info: { port: 1 }, page };
+  };
+
+  const report = await pipeline.importBatch([instagramRecord("batch-recoverable"), instagramRecord("batch-blocked")]);
+  assert.equal(report.total, 2);
+
+  const recovered = report.results.find((r) => r.username === "batch-recoverable");
+  const blocked = report.results.find((r) => r.username === "batch-blocked");
+  assert.equal(recovered.status, "READY");
+  assert.equal(blocked.status, "CHALLENGE_REQUIRED");
+  assert.equal(blocked.sessionState, "PRIVACY_CHOICE_REQUIRED");
+
+  // Both accounts were fully, independently processed - the blocked one
+  // never prevented the recoverable one from reaching READY, and vice
+  // versa never masked the blocked one's real state.
+  const recoveredAccount = await accountManager.getAccountById(recovered.accountId);
+  const blockedAccount = await accountManager.getAccountById(blocked.accountId);
+  assert.equal(recoveredAccount.sessionStatus, "ready");
+  assert.equal(blockedAccount.sessionStatus, "challenge_required");
+});

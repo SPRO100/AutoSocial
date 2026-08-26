@@ -620,6 +620,13 @@ async function createServer() {
           sessionStatus: account.sessionStatus || "unknown",
           sessionCheckedAt: account.sessionCheckedAt || null,
           sessionReason: account.sessionReason || null,
+          // Session Recovery Pipeline record (see session-recovery.js) -
+          // granular state and the safe, non-secret attempt history. Both
+          // null for any account never processed through recovery (every
+          // account checked before this milestone, or a platform with no
+          // recoverable states).
+          sessionState: account.sessionState || null,
+          sessionRecoveryAttempts: account.sessionRecoveryAttempts || null,
           lastPublishStatus: account.lastPublishStatus || null,
           lastPublishAt: account.lastPublishAt || null,
           lastPublishError: account.lastPublishError || null,

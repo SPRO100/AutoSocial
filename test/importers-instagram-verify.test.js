@@ -90,11 +90,12 @@ test("reports NOT active for a checkpoint/challenge gate", async () => {
   assert.match(result.reason, /checkpoint|challenge/i);
 });
 
-test("reports NOT active for a consent/onetap gate", async () => {
+test("reports NOT active for a consent/onetap gate, classified as PRIVACY_CHOICE_REQUIRED - never guessed as a safe cookie banner", async () => {
   const page = makePage({ finalUrl: "https://www.instagram.com/accounts/onetap/", bodyText: "" });
   const result = await verifyInstagramSession(page);
   assert.equal(result.active, false);
-  assert.match(result.reason, /consent|verification/i);
+  assert.equal(result.state, "PRIVACY_CHOICE_REQUIRED");
+  assert.match(result.reason, /privacy|subscription|consent/i);
 });
 
 test("reports NOT active when navigated off instagram.com entirely", async () => {

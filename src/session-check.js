@@ -28,6 +28,7 @@
 const accountManager = require("./account-manager");
 const persona = require("./persona-browser");
 const accountLock = require("./account-lock");
+const { recoverSession, mapToSessionStatus } = require("./session-recovery");
 
 const VERIFIERS = {
   tiktok: require("./importers/tiktok-verify").verifyTikTokSession,
@@ -35,6 +36,14 @@ const VERIFIERS = {
   youtube: require("./importers/youtube-verify").verifyYouTubeSession,
   threads: require("./importers/threads-verify").verifyThreadsSession,
   x: require("./importers/x-verify").verifyXSession,
+};
+
+// Same Session Recovery Pipeline the import pipeline uses (see
+// importers/pipeline.js) - a manual "Check session" click gets the exact
+// same bounded, fail-closed auto-recovery benefit as a fresh import, never
+// a second/divergent implementation. Only Instagram currently has one.
+const RECOVERERS = {
+  instagram: require("./importers/instagram-recovery"),
 };
 
 function safeMessage(error) {
@@ -102,23 +111,38 @@ async function checkSessionUnlocked(accountId, requestedPlatform) {
   let session = null;
   let sessionStatus = "unknown";
   let reason = null;
+  let sessionState = null;
+  let recoveryAttempts = null;
   try {
     session = await persona.attachPersonaProfile(profileId, { headless: true });
     // Bind the check to the real imported identity when the verifier
     // supports it (currently Instagram) - never lets a session that's
     // authenticated as a DIFFERENT account read as Ready for this one.
     // Verifiers that don't accept a second argument (TikTok, YouTube, ...)
-    // simply ignore it.
-    const result = await verify(session.page, account.name || null);
-    sessionStatus = result.active ? "ready" : (result.challenge ? "challenge_required" : "needs_login");
-    reason = result.active ? null : safeVerifyReason(result.reason);
+    // simply ignore it. Recovery (see ../session-recovery.js) only ever
+    // acts on a SAFE, recognized state - every security/policy-sensitive
+    // outcome is returned exactly as the verifier classified it.
+    const recover = RECOVERERS[platform];
+    const outcome = await recoverSession({
+      verify,
+      recover,
+      page: session.page,
+      username: account.name || null,
+      account: accountId,
+      platform,
+      personaProfileId: profileId,
+    });
+    sessionStatus = mapToSessionStatus(outcome);
+    reason = outcome.active ? null : safeVerifyReason(outcome.reason);
+    sessionState = outcome.state || null;
+    recoveryAttempts = outcome.attempts || null;
     // Safe diagnostic observability: account/platform/decision/reason and
     // the real final URL the verifier landed on - never a cookie, token, or
     // password value (none of those ever reach this module in the first
     // place; session.page only exposes navigation state).
     console.log(
-      `[session-check] account=${accountId} platform=${platform} status=${sessionStatus} ` +
-      `finalUrl=${safeFinalUrl(session.page)} reason=${JSON.stringify(reason || result.reason || null)}`
+      `[session-check] account=${accountId} platform=${platform} status=${sessionStatus} state=${sessionState || "n/a"} ` +
+      `finalUrl=${safeFinalUrl(session.page)} reason=${JSON.stringify(reason || outcome.reason || null)}`
     );
   } catch (error) {
     sessionStatus = "error";
@@ -136,9 +160,9 @@ async function checkSessionUnlocked(accountId, requestedPlatform) {
   }
 
   const checkedAt = new Date().toISOString();
-  await accountManager.setSessionStatus(accountId, { status: sessionStatus, reason, checkedAt });
+  await accountManager.setSessionStatus(accountId, { status: sessionStatus, reason, checkedAt, state: sessionState, attempts: recoveryAttempts });
 
-  return { ok: true, accountId, personaProfileId: profileId, sessionStatus, reason, checkedAt };
+  return { ok: true, accountId, personaProfileId: profileId, sessionStatus, reason, checkedAt, sessionState };
 }
 
 // Returns { ok, accountId, personaProfileId, sessionStatus, reason,
