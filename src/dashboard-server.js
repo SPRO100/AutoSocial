@@ -853,6 +853,45 @@ async function createServer() {
     }
   });
 
+  // Autonomous Production Pipeline - bounded, read-only, best-effort
+  // reconciliation for a publish whose Share click succeeded but whose
+  // confirmation was lost (UNCONFIRMED). Reuses instagram-uploader.js's
+  // own capturePermalink() (the SAME function the real publish path calls
+  // on a *confirmed* success) - this endpoint is the sole way to ask that
+  // same question again, later, out of band. It never mutates Instagram in
+  // any way (no click, no navigation beyond read-only profile view) and
+  // never claims a negative result - "no evidence found" always means
+  // "still unconfirmed", never "failed". Content-OS's publishing-router is
+  // the only thing allowed to turn this into a status change, and only on
+  // positive evidence; this route itself makes no state change.
+  app.post("/api/account/:id/reconcile-post", async (req, res) => {
+    const accountId = req.params.id;
+    try {
+      const account = await getAccountById(accountId);
+      if (!account) return res.status(404).json({ ok: false, error: "Account not found." });
+      if (account.importPlatform !== "instagram") {
+        return res.status(501).json({ ok: false, code: "UNSUPPORTED_PLATFORM", error: "Post reconciliation is currently implemented for Instagram only.", remotePostId: null, remotePostUrl: null, upgraded: false });
+      }
+      if (account.sessionStatus !== "ready") {
+        return res.status(409).json({ ok: false, code: "SESSION_NOT_READY", error: "Account session is not READY; reconciliation requires a live, authenticated session.", remotePostId: null, remotePostUrl: null, upgraded: false });
+      }
+      if (!accountLock.tryLock(accountId)) {
+        return res.status(409).json({ ok: false, code: "ACCOUNT_BUSY", error: "Account is currently busy with another operation.", remotePostId: null, remotePostUrl: null, upgraded: false });
+      }
+      let session;
+      try {
+        session = await acquireBrowserSession(account.importPlatform, { accountId });
+        const { remotePostId, remotePostUrl } = await instagramUploader.capturePermalink(session.page, account.importUsername);
+        res.json({ ok: true, remotePostId, remotePostUrl, upgraded: Boolean(remotePostId) });
+      } finally {
+        if (session) await session.disconnect().catch(() => {});
+        accountLock.unlock(accountId);
+      }
+    } catch (error) {
+      res.status(500).json({ ok: false, error: error.message, remotePostId: null, remotePostUrl: null, upgraded: false });
+    }
+  });
+
   // Logical pool organization only - never deletes/mutates the platform
   // account itself. See account-manager.js#setPool's own doc comment.
   app.post("/api/account/:id/pool", async (req, res) => {
