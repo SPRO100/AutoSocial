@@ -178,8 +178,8 @@ function normalizeAccount(item) {
   if (supplierBatchId) account.supplierBatchId = supplierBatchId;
   const sessionSource = normalizeSourceField(item.sessionSource);
   if (sessionSource) account.sessionSource = sessionSource;
-  const cookieIntegrity = normalizeCookieIntegrity(item.cookieIntegrity);
-  if (cookieIntegrity) account.cookieIntegrity = cookieIntegrity;
+  const sessionIntegrity = normalizeCookieIntegrity(item.sessionIntegrity || item.cookieIntegrity);
+  if (sessionIntegrity) account.sessionIntegrity = sessionIntegrity;
 
   // Safe, non-secret operational status - last known verified social
   // session health and last publish outcome. Set by session-check.js
@@ -359,8 +359,8 @@ async function addAccount(name, extra = {}) {
     const value = normalizeSourceField(extra[field]);
     if (value) account[field] = value;
   }
-  const cookieIntegrity = normalizeCookieIntegrity(extra.cookieIntegrity);
-  if (cookieIntegrity) account.cookieIntegrity = cookieIntegrity;
+  const sessionIntegrity = normalizeCookieIntegrity(extra.sessionIntegrity || extra.cookieIntegrity);
+  if (sessionIntegrity) account.sessionIntegrity = sessionIntegrity;
   state.accounts.push(account);
   state.activeAccountId = account.id;
   await saveState();

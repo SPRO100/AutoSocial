@@ -335,7 +335,7 @@ async function processRecord(record, updateSessionKeys, importMeta = {}) {
       supplierFormat: importMeta.format || null,
       supplierBatchId: importMeta.batchId || null,
       sessionSource: record.cookies ? "supplier_cookie_bundle" : "credentials_only",
-      cookieIntegrity: record.cookies ? analyzeCookieSet(record.cookies, record.platform) : null,
+      sessionIntegrity: record.cookies ? analyzeCookieSet(record.cookies, record.platform) : null,
     });
     accountId = account.id;
   } catch (error) {
