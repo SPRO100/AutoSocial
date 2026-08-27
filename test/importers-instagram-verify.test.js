@@ -126,6 +126,33 @@ test("reports NOT active with state ACCOUNT_SUSPENDED for a real /accounts/suspe
   assert.match(result.reason, /suspend/i);
 });
 
+// --- Real production finding (2026-08-27, Account Operations milestone): the
+// SAME /accounts/suspended/ URL also renders Instagram's own interactive
+// "Confirm you're human" checkpoint on 2 real accounts - distinct from a
+// genuine suspension, and previously misclassified as ACCOUNT_SUSPENDED
+// because the old gate matched on URL alone. ---
+
+test("reports HUMAN_VERIFICATION_REQUIRED (never ACCOUNT_SUSPENDED) when the suspended-URL page's real text is Instagram's 'Confirm you're human' checkpoint", async () => {
+  const page = makePage({
+    finalUrl: "https://www.instagram.com/accounts/suspended/?next=https%3A%2F%2Fwww.instagram.com%2Faccounts%2Faccount_type_and_tools%2F",
+    bodyText: "Confirm you're human to use your account, someuser\nContinue\nTakes about 30 seconds",
+  });
+  const result = await verifyInstagramSession(page);
+  assert.equal(result.active, false);
+  assert.equal(result.state, "HUMAN_VERIFICATION_REQUIRED");
+  assert.notEqual(result.state, "ACCOUNT_SUSPENDED");
+  assert.match(result.reason, /human verification/i);
+});
+
+test("a genuine suspension page with no 'confirm you're human' text still reports ACCOUNT_SUSPENDED (the disambiguation never weakens the original fail-closed gate)", async () => {
+  const page = makePage({
+    finalUrl: "https://www.instagram.com/accounts/suspended/?next=https%3A%2F%2Fwww.instagram.com%2F",
+    bodyText: "",
+  });
+  const result = await verifyInstagramSession(page);
+  assert.equal(result.state, "ACCOUNT_SUSPENDED");
+});
+
 // --- Genuinely authenticated ---
 
 test("reports active when the home page shows the authenticated app shell (<nav> present) with no gate", async () => {

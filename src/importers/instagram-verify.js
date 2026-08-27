@@ -91,6 +91,21 @@ const STATES = {
   // checkpoint) - an operator needs to know "this account was suspended by
   // Instagram", not "this needs a checkpoint answered".
   ACCOUNT_SUSPENDED: "ACCOUNT_SUSPENDED",
+  // Real production finding (2026-08-27, Account Operations milestone,
+  // 2 real accounts): Instagram's own interactive "Confirm you're human to
+  // use your account" checkpoint renders at the SAME /accounts/suspended/
+  // URL as a genuine ACCOUNT_SUSPENDED enforcement page - text is what
+  // actually disambiguates them (see the human_verification GATE below,
+  // matched on text BEFORE the URL-only account_suspended fallback). This
+  // is a solvable interactive checkpoint ("Continue", "Takes about 30
+  // seconds"), not a terminal enforcement action - reporting it as
+  // ACCOUNT_SUSPENDED would wrongly steer an otherwise-recoverable account
+  // toward permanent archive/delete. Never auto-resolved (see
+  // ../importers/instagram-recovery.js's SAFE_RECOVERABLE_STATES, which
+  // does not include this state) - the checkpoint itself may require a
+  // real device/CAPTCHA verification this codebase must never attempt to
+  // bypass.
+  HUMAN_VERIFICATION_REQUIRED: "HUMAN_VERIFICATION_REQUIRED",
   // The fail-closed outcome for "reached instagram.com, matched no known
   // gate, and found no positive authenticated evidence either" - see
   // hasPositiveAuthenticatedEvidence below - and for a navigation/runtime
@@ -208,6 +223,20 @@ const GATES = [
   // text pattern is added here without that evidence; see this module's own
   // header comment on not inventing unconfirmed signatures). Never
   // recoverable - see instagram-recovery.js's SAFE_RECOVERABLE_STATES.
+  // Text-matched only (never a URL match - see this gate's own STATES
+  // comment) so it is checked, and wins, BEFORE the URL-only
+  // account_suspended fallback immediately below whenever this specific
+  // interactive-checkpoint text is present at that same URL. A genuine
+  // suspension page with different body text still falls through to
+  // account_suspended unchanged.
+  {
+    name: "human_verification",
+    state: STATES.HUMAN_VERIFICATION_REQUIRED,
+    code: "instagram_human_verification_required",
+    reason: "Instagram is requiring interactive human verification ('Confirm you're human') before this account can be used - a solvable checkpoint, not a confirmed suspension",
+    url: /(?!)/,
+    text: /confirm you.?re human/i,
+  },
   {
     name: "account_suspended",
     state: STATES.ACCOUNT_SUSPENDED,

@@ -81,7 +81,7 @@ function healthForAccount(account, now = Date.now()) {
   const state = account.sessionState || null;
   const checked = account.sessionCheckedAt ? new Date(account.sessionCheckedAt).getTime() : NaN;
   const stale = status === "ready" && (!Number.isFinite(checked) || now - checked > FRESHNESS_MS);
-  if (state === "ACCOUNT_SUSPENDED" || status === "challenge_required") return { healthState: "QUARANTINED", failureClass: state === "ACCOUNT_SUSPENDED" ? "ACCOUNT_SUSPENDED" : "CHALLENGE_REQUIRED", stale: false };
+  if (state === "ACCOUNT_SUSPENDED" || state === "HUMAN_VERIFICATION_REQUIRED" || status === "challenge_required") return { healthState: "QUARANTINED", failureClass: state === "ACCOUNT_SUSPENDED" || state === "HUMAN_VERIFICATION_REQUIRED" ? state : "CHALLENGE_REQUIRED", stale: false };
   if (status === "needs_login") return { healthState: "LOGIN_REQUIRED", failureClass: state || "LOGIN_REQUIRED", stale: false };
   if (status === "unknown" || status === "error") return { healthState: "UNKNOWN", failureClass: state || status.toUpperCase(), stale: false };
   if (stale) return { healthState: "DEGRADED", failureClass: "STALE_READY", stale: true };

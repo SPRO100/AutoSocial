@@ -36,13 +36,14 @@ function fakeLocator(script = {}) {
 // function(url) => landedUrl. `locators` maps a selector-matching RegExp to
 // a locator script (see fakeLocator). `getByRole` maps a name-matching
 // RegExp to a locator script.
-function fakePage({ routes = [], locators = [], getByRole = [], evaluateResult = null, gotoError = null } = {}) {
+function fakePage({ routes = [], locators = [], getByRole = [], evaluateResult = null, gotoError = null, gotoStatus = 200 } = {}) {
   let currentUrl = "https://www.instagram.com/";
   return {
     async goto(url) {
       if (gotoError) throw gotoError;
       const match = routes.find(([re]) => re.test(url));
       currentUrl = match ? (typeof match[1] === "function" ? match[1](url) : match[1]) : url;
+      return { status: () => gotoStatus };
     },
     async waitForLoadState() {},
     async waitForTimeout() {},
@@ -224,6 +225,13 @@ test("readTikTokPrivacy: real 'Private account' switch checked=true resolves PRI
   assert.equal(result.privacyStatus, "PRIVATE");
 });
 
+test("readTikTokProfileLink: a real HTTP 403 on the profile page is reported precisely, never guessed as a generic render failure", async () => {
+  const page = fakePage({ gotoStatus: 403 });
+  const result = await readTikTokProfileLink(page, "fakeuser");
+  assert.equal(result.linkCapability, "UNKNOWN");
+  assert.ok(result.evidence.includes("profile_page_blocked_http_403"));
+});
+
 test("readTikTokProfileLink: no username supplied never guesses a profile URL", async () => {
   const result = await readTikTokProfileLink(fakePage(), null);
   assert.equal(result.linkCapability, "UNKNOWN");
@@ -235,7 +243,7 @@ test("readTikTokProfileLink: blank-rendered profile page reports UNKNOWN, not UN
   page.locator = () => ({ innerText: async () => "" });
   const result = await readTikTokProfileLink(page, "fakeuser");
   assert.equal(result.linkCapability, "UNKNOWN");
-  assert.ok(result.evidence.includes("profile_page_did_not_render"));
+  assert.ok(result.evidence.includes("profile_page_did_not_render_http_200"));
 });
 
 test("probeTikTokCapabilities never leaks the raw username into evidence", async () => {

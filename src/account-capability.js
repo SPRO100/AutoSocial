@@ -210,17 +210,28 @@ async function readTikTokPrivacy(page) {
       evidence.push("settings_page_did_not_render");
       return { privacyStatus: "UNKNOWN", evidence };
     }
+    // Real finding (2026-08-27): TikTok's "Private account" control on the
+    // real Settings page is a plain <input type="checkbox"> from its "TUX"
+    // design system - it carries NEITHER role="switch" NOR any aria-checked/
+    // aria-label attribute (confirmed via direct DOM inspection of a real,
+    // reachable account). The real, robust signal is the checkbox's own
+    // `.checked` DOM property, not ARIA (which this specific component
+    // never sets) - checked first for defense in depth, since a future
+    // TikTok markup revision might add proper ARIA.
     const state = await page.evaluate(() => {
-      const byLabel = Array.from(document.querySelectorAll('[role="switch"]'))
+      const byRole = Array.from(document.querySelectorAll('[role="switch"]'))
         .find((el) => /private account/i.test(el.getAttribute("aria-label") || ""));
-      if (byLabel) return byLabel.getAttribute("aria-checked");
+      if (byRole) return byRole.getAttribute("aria-checked");
       const heading = Array.from(document.querySelectorAll("*"))
         .find((n) => n.children.length === 0 && /^private account$/i.test((n.textContent || "").trim()));
       let node = heading || null;
-      for (let i = 0; i < 5 && node; i += 1) {
+      for (let i = 0; i < 6 && node; i += 1) {
         node = node.parentElement;
-        const sw = node?.querySelector('[role="switch"]');
-        if (sw) return sw.getAttribute("aria-checked");
+        if (!node) break;
+        const roleSwitch = node.querySelector('[role="switch"]');
+        if (roleSwitch) return roleSwitch.getAttribute("aria-checked");
+        const checkbox = node.querySelector('input[type="checkbox"]');
+        if (checkbox) return checkbox.checked ? "true" : "false";
       }
       return null;
     }).catch(() => null);
@@ -238,13 +249,15 @@ async function readTikTokPrivacy(page) {
   }
 }
 
-// Real finding (2026-08-27): TikTok's own @username profile page rendered a
-// genuinely empty document (0-length body/HTML) through this account's
-// Persona session on every attempt, while /setting rendered normally in the
-// same session. This is reported honestly as UNKNOWN, never guessed -
-// see this module's header comment. It is real, currently-unresolved
-// evidence that TikTok's Website-link field cannot yet be reliably observed
-// through this route, not proof the capability itself is unavailable.
+// Real finding (2026-08-27): TikTok's own @username profile page returns a
+// genuine HTTP 403 (confirmed via the navigation response itself, not just
+// an empty-body guess) through this account's Persona session, reproduced
+// twice including with an in-context Referer - while /setting reliably
+// returns 200 in the same session. This is a real platform/edge-level
+// block on this specific route, not a DOM/selector bug our own code could
+// fix by waiting longer or trying another locator. Reported honestly as
+// UNKNOWN with the precise HTTP status in evidence, never guessed, never
+// silently downgraded to UNAVAILABLE (see this module's header comment).
 async function readTikTokProfileLink(page, username) {
   const evidence = [];
   if (!username) {
@@ -252,12 +265,17 @@ async function readTikTokProfileLink(page, username) {
     return { profileEditCapability: "UNKNOWN", linkCapability: "UNKNOWN", observedProfileLink: null, evidence };
   }
   try {
-    await page.goto(`https://www.tiktok.com/@${encodeURIComponent(username)}`, { waitUntil: "load", timeout: 30000 });
+    const response = await page.goto(`https://www.tiktok.com/@${encodeURIComponent(username)}`, { waitUntil: "load", timeout: 30000 });
+    const status = response ? response.status() : null;
+    if (status && status >= 400) {
+      evidence.push(`profile_page_blocked_http_${status}`);
+      return { profileEditCapability: "UNKNOWN", linkCapability: "UNKNOWN", observedProfileLink: null, evidence };
+    }
     await page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {});
     await page.waitForTimeout(3000);
     const bodyLen = (await page.locator("body").innerText().catch(() => "")).length;
     if (bodyLen < 20) {
-      evidence.push("profile_page_did_not_render");
+      evidence.push(`profile_page_did_not_render${status ? `_http_${status}` : ""}`);
       return { profileEditCapability: "UNKNOWN", linkCapability: "UNKNOWN", observedProfileLink: null, evidence };
     }
     const editButton = page.getByRole("button", { name: /edit profile/i }).first();

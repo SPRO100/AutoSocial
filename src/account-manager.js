@@ -84,6 +84,10 @@ const SESSION_STATE_VALUES = new Set([
   // the value to null on persistence, even though it was classified
   // correctly upstream.
   "ACCOUNT_SUSPENDED",
+  // Account Operations milestone hardening (2026-08-27) - see
+  // importers/instagram-verify.js STATES's own comment: a distinct,
+  // solvable interactive checkpoint, never conflated with ACCOUNT_SUSPENDED.
+  "HUMAN_VERIFICATION_REQUIRED",
   "UNKNOWN",
 ]);
 // Bounded so a account's history can never grow unbounded across repeated
