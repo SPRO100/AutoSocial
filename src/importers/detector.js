@@ -7,15 +7,22 @@
 const tiktokPipe7 = require("./suppliers/tiktok-pipe7");
 const csv = require("./suppliers/csv");
 const instagramColon = require("./suppliers/instagram-colon");
+const instagramAndroidSession = require("./suppliers/instagram-android-session");
 const youtubeSupplier = require("./suppliers/youtube-supplier");
 const credentialsAuto = require("./suppliers/credentials-auto");
 
 // Registration order also breaks ties when two adapters score equally
 // (Array#sort is stable) - the more specific/structural adapters
-// (instagram-colon, tiktok-pipe7, youtube-supplier) are listed before the
-// generic ones (csv, credentials-auto) so a file that could plausibly match
-// either prefers the platform-specific parser.
-const SUPPLIERS = [instagramColon, tiktokPipe7, youtubeSupplier, csv, credentialsAuto];
+// (instagram-android-session, instagram-colon, tiktok-pipe7,
+// youtube-supplier) are listed before the generic ones (csv,
+// credentials-auto) so a file that could plausibly match either prefers
+// the platform-specific parser. instagram-android-session is listed
+// BEFORE instagram-colon specifically: its "||" + single "|" shape is a
+// strictly stronger structural signal than instagram-colon's single ":",
+// so it should win any tie rather than rely on instagram-colon happening
+// to reject the same lines on its own (see this format's own module
+// comment for why a collision is unlikely but not impossible).
+const SUPPLIERS = [instagramAndroidSession, instagramColon, tiktokPipe7, youtubeSupplier, csv, credentialsAuto];
 
 // Returns the first matching adapter, or null if nothing recognizes the
 // file. Order matters only if two adapters could both match the same text;

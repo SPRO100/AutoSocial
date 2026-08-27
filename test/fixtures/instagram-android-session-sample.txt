@@ -1,0 +1,9 @@
+=================================================
+   Order: Instagram accounts - Order #10245
+   Supplier #1 - premium warmed accounts
+=================================================
+
+Your order below:
+
+fakeuser_one:FakePass!Aa1||FAKE-DEVICE-UUID-0001;FAKE-PHONE-ID-0001;FAKE-ADID-0001;29|Authorization=Bearer FAKE:JWT:TOKEN:VALUE1;X-MID=FAKE_MID_0001;IG-U-DS-USER-ID=1000000001;IG-U-RUR=FAKE_RUR_0001;X-IG-WWW-Claim=FAKE_CLAIM_0001;csrftoken=fakecsrftoken0001;sessionid=fakesessionid0001|||
+fakeuser_two:FakePass!Bb2||FAKE-DEVICE-UUID-0002;FAKE-PHONE-ID-0002;FAKE-ADID-0002;30|Authorization=Bearer FAKE:JWT:TOKEN:VALUE2;X-MID=FAKE_MID_0002;IG-U-DS-USER-ID=1000000002;IG-U-RUR=FAKE_RUR_0002;X-IG-WWW-Claim=FAKE_CLAIM_0002;csrftoken=fakecsrftoken0002;sessionid=fakesessionid0002|||
