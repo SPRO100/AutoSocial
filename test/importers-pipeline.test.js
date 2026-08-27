@@ -955,3 +955,92 @@ test("batch isolation: one account stuck on a policy decision does not block ano
   assert.equal(recoveredAccount.sessionStatus, "ready");
   assert.equal(blockedAccount.sessionStatus, "challenge_required");
 });
+
+// --- Session completeness gate (Import V1 cookie-safety hardening,
+// 2026-08-27, real instagram-android-session-v1 supplier finding) --------
+// A header-style Instagram session missing a critical browser-cookie name
+// (see account-health.js's CRITICAL_INSTAGRAM_COOKIES) must never trigger
+// an automatic real navigation to Instagram - see cookie-adapter.js's own
+// matching filter, which restricts what actually becomes a Persona cookie
+// in the first place. All fixture values below are 100% synthetic.
+
+const INCOMPLETE_ANDROID_SESSION_BLOCK =
+  "Authorization=Bearer FAKE:JWT:TOKEN:VALUE1;X-MID=FAKE_MID_0001;IG-U-DS-USER-ID=1000000001;IG-U-RUR=FAKE_RUR_0001;X-IG-WWW-Claim=FAKE_CLAIM_0001;csrftoken=fakecsrftoken0001;sessionid=fakesessionid0001";
+const COMPLETE_INSTAGRAM_COOKIE_BLOCK = "sessionid=fakeSess1;csrftoken=fakeCsrf1;ds_user_id=1000000099";
+
+test("(J)(K) incomplete Instagram browser-cookie set (missing ds_user_id) skips automatic verify - no attach, no page.goto", async () => {
+  const { pipeline, calls } = await freshPipeline();
+  const report = await pipeline.importBatch([instagramRecord("incomplete-cookie-user", { cookies: INCOMPLETE_ANDROID_SESSION_BLOCK })]);
+  const [result] = report.results;
+
+  assert.equal(calls.attachPersonaProfile.length, 0, "no Persona attach (and therefore no page.goto to Instagram) may ever occur for an incomplete cookie set");
+  assert.equal(result.sessionState, "UNKNOWN");
+});
+
+test("(L) account and Persona profile remain successfully created even though verify was intentionally skipped", async () => {
+  const { pipeline, accountManager } = await freshPipeline();
+  const report = await pipeline.importBatch([instagramRecord("incomplete-cookie-user-2", { cookies: INCOMPLETE_ANDROID_SESSION_BLOCK })]);
+  const [result] = report.results;
+
+  assert.equal(result.autosocial, "Created");
+  assert.equal(result.persona, "Created");
+  assert.ok(result.accountId);
+  assert.ok(result.personaProfileId);
+  assert.equal(result.cookies, "Imported", "the safe, allowlisted cookies (sessionid/csrftoken) were still actually imported into Persona");
+  const account = await accountManager.getAccountById(result.accountId);
+  assert.equal(account.personaProfileId, result.personaProfileId, "the account remains linked to its real Persona profile - no rollback occurred");
+});
+
+test("(M) session status is never Ready when verify was skipped for an incomplete cookie set", async () => {
+  const { pipeline, accountManager } = await freshPipeline();
+  const report = await pipeline.importBatch([instagramRecord("incomplete-cookie-user-3", { cookies: INCOMPLETE_ANDROID_SESSION_BLOCK })]);
+  const [result] = report.results;
+
+  assert.notEqual(result.status, "READY");
+  assert.notEqual(result.sessionState, "READY");
+  const account = await accountManager.getAccountById(result.accountId);
+  assert.notEqual(account.sessionStatus, "ready");
+  assert.equal(account.sessionStatus, "unknown");
+});
+
+test("(N) the import result explains the skip with the missing cookie NAME only - never a cookie value, never the raw supplier block", async () => {
+  const { pipeline } = await freshPipeline();
+  const report = await pipeline.importBatch([instagramRecord("incomplete-cookie-user-4", { cookies: INCOMPLETE_ANDROID_SESSION_BLOCK })]);
+  const [result] = report.results;
+
+  assert.match(result.reason, /skip/i);
+  assert.match(result.reason, /incomplete/i);
+  assert.match(result.reason, /ds_user_id/);
+  const serialized = JSON.stringify(result);
+  assert.equal(serialized.includes("fakesessionid0001"), false, "no cookie VALUE may appear in the result");
+  assert.equal(serialized.includes("fakecsrftoken0001"), false);
+  assert.equal(serialized.includes("FAKE_MID_0001"), false);
+  assert.equal(serialized.includes("FAKE:JWT:TOKEN:VALUE1"), false);
+});
+
+test("(O) a COMPLETE Instagram browser-cookie set (sessionid+csrftoken+ds_user_id) is unaffected - existing verify behavior is preserved", async () => {
+  const { pipeline, calls } = await freshPipeline({ sessionUrl: "https://www.instagram.com/accounts/login/" });
+  const report = await pipeline.importBatch([instagramRecord("complete-cookie-user", { cookies: COMPLETE_INSTAGRAM_COOKIE_BLOCK })]);
+  const [result] = report.results;
+
+  assert.equal(calls.attachPersonaProfile.length, 1, "a complete cookie set must still trigger the normal attach+verify path, exactly as before this change");
+  assert.equal(result.sessionState, "LOGIN_REQUIRED", "a real verify actually ran (matched the login gate) - this is NOT the completeness-gate skip path (which would report UNKNOWN)");
+});
+
+test("(P) credential-only Instagram records (no cookies at all) are completely unaffected by the completeness gate", async () => {
+  const { pipeline, calls } = await freshPipeline({ sessionUrl: "https://www.instagram.com/accounts/login/" });
+  const report = await pipeline.importBatch([instagramRecord("no-cookies-user")]);
+  const [result] = report.results;
+
+  assert.equal(calls.attachPersonaProfile.length, 1, "no cookies at all is a different case from an incomplete cookie set - verify must still be attempted exactly as before");
+  assert.equal(result.sessionState, "LOGIN_REQUIRED");
+});
+
+test("(Q) TikTok records with cookies are completely unaffected by the Instagram-only completeness gate", async () => {
+  const { pipeline, calls } = await freshPipeline({ sessionUrl: ACTIVE_URL });
+  const report = await pipeline.importBatch([tiktokRecord("tiktok-unaffected-user")]);
+  const [result] = report.results;
+
+  assert.equal(calls.attachPersonaProfile.length, 1);
+  assert.equal(result.status, "READY");
+});

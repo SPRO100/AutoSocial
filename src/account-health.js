@@ -109,4 +109,4 @@ function qualitySummary(accounts) {
   };
 }
 
-module.exports = { analyzeCookieSet, healthForAccount, qualitySummary, FRESHNESS_MS };
+module.exports = { analyzeCookieSet, healthForAccount, qualitySummary, FRESHNESS_MS, CRITICAL_INSTAGRAM_COOKIES };

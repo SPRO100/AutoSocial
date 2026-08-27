@@ -14,6 +14,8 @@
 // conservative per-platform default domain, since the header string itself
 // carries no domain/path/expiry) and passes anything already
 // JSON/Netscape-shaped straight through unchanged.
+const { CRITICAL_INSTAGRAM_COOKIES } = require("../account-health");
+
 const PLATFORM_DEFAULT_DOMAIN = {
   tiktok: ".tiktok.com",
   instagram: ".instagram.com",
@@ -106,8 +108,30 @@ function toPersonaCookiePayload(raw, platform) {
     return { text };
   }
 
-  const pairs = parseHeaderStyleCookies(text);
+  let pairs = parseHeaderStyleCookies(text);
   if (!pairs.length) return null;
+
+  // Instagram-only safety scope (2026-08-27, real supplier finding -
+  // instagram-android-session-v1): a header-style Instagram session block
+  // can legitimately mix real browser-cookie names (sessionid, csrftoken,
+  // ds_user_id - the exact set this codebase already trusts, see
+  // account-health.js's CRITICAL_INSTAGRAM_COOKIES) with Instagram's own
+  // private/mobile-API authorization headers (Authorization, X-MID,
+  // IG-U-*, X-IG-*), which are NOT browser cookies and must never become
+  // one - confirmed by a real-code audit of this exact transform. Only
+  // names this codebase already confirms are real Instagram browser
+  // cookies survive into the Persona payload; everything else is dropped
+  // HERE ONLY (the full raw block is untouched in the canonical record -
+  // see normalize.js/pipeline.js, nothing is lost, only this one
+  // transformation is narrowed). Name-for-name only - IG-U-DS-USER-ID is
+  // never rewritten to ds_user_id, X-MID is never rewritten to mid, since
+  // no existing implementation/test confirms that mapping is safe.
+  // Every OTHER platform's header-style cookie string (TikTok, YouTube,
+  // ...) is completely unaffected by this branch.
+  if (String(platform).toLowerCase() === "instagram") {
+    pairs = pairs.filter((pair) => CRITICAL_INSTAGRAM_COOKIES.has(pair.name.toLowerCase()));
+    if (!pairs.length) return null;
+  }
 
   const domain = PLATFORM_DEFAULT_DOMAIN[platform];
   if (!domain) return null;

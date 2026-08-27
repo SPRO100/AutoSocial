@@ -19,7 +19,7 @@ const accountManager = require("../account-manager");
 const persona = require("../persona-browser");
 const { toSafePreview, duplicateKey } = require("./normalize");
 const { toPersonaCookiePayload } = require("./cookie-adapter");
-const { analyzeCookieSet } = require("../account-health");
+const { analyzeCookieSet, CRITICAL_INSTAGRAM_COOKIES } = require("../account-health");
 const credentialVault = require("../security/credential-vault");
 const { recoverSession, mapToPipelineStatus, mapToSessionStatus } = require("../session-recovery");
 const { summarizeProxy } = require("../network-identity");
@@ -130,7 +130,14 @@ function safeMessage(error) {
 // produced it. Best-effort: a failure to persist status must never fail
 // the import/update itself, which has already completed by this point.
 async function persistSessionStatus(accountId, pipelineStatus, reason, { state = null, attempts = null } = {}) {
-  const map = { READY: "ready", NEEDS_LOGIN: "needs_login", CHALLENGE_REQUIRED: "challenge_required", FAILED: "error" };
+  // UNKNOWN is never produced by mapToPipelineStatus (it maps UNKNOWN to
+  // the legacy NEEDS_LOGIN bucket for the 4-value import-report layer -
+  // see session-recovery.js) - this entry exists only for the session-
+  // completeness gate below (processRecord), which persists the account's
+  // real coarse status directly, bypassing that legacy narrowing, exactly
+  // like session-check.js's own mapToSessionStatus already does for a real
+  // verify-time UNKNOWN outcome.
+  const map = { READY: "ready", NEEDS_LOGIN: "needs_login", CHALLENGE_REQUIRED: "challenge_required", FAILED: "error", UNKNOWN: "unknown" };
   const status = map[pipelineStatus];
   if (!status || !accountId) return;
   // state/attempts are the Session Recovery Pipeline's granular record -
@@ -328,6 +335,10 @@ async function processRecord(record, updateSessionKeys, importMeta = {}) {
   let profileId = null;
 
   // 1. AutoSocial account
+  // Computed once, reused both for the persisted DB record below and for
+  // the session-completeness gate ahead of step 5 - a single source of
+  // truth per record, never recomputed/re-derived twice.
+  const sessionIntegrity = record.cookies ? analyzeCookieSet(record.cookies, record.platform) : null;
   try {
     const account = await accountManager.addAccount(record.username, {
       importPlatform: record.platform,
@@ -336,7 +347,7 @@ async function processRecord(record, updateSessionKeys, importMeta = {}) {
       supplierFormat: importMeta.format || null,
       supplierBatchId: importMeta.batchId || null,
       sessionSource: record.cookies ? "supplier_cookie_bundle" : "credentials_only",
-      sessionIntegrity: record.cookies ? analyzeCookieSet(record.cookies, record.platform) : null,
+      sessionIntegrity,
       networkIdentity: summarizeProxy(record.proxy),
     });
     accountId = account.id;
@@ -465,7 +476,37 @@ async function processRecord(record, updateSessionKeys, importMeta = {}) {
   let sessionState = null;
   let recoveryAttempts = null;
 
-  if (verify) {
+  // Session completeness gate (Import V1 cookie-safety hardening,
+  // 2026-08-27): only Instagram has a critical-cookie completeness model
+  // (see account-health.js's CRITICAL_INSTAGRAM_COOKIES, the same set
+  // cookie-adapter.js's header-style filter above already restricts
+  // browser-cookie injection to) - a session missing one of those critical
+  // names, BY NAME, in the raw supplier data is known incomplete before
+  // any navigation is ever attempted. Real-code audit confirmed the old
+  // behavior (unconditional attach+verify) would send exactly this kind of
+  // incomplete cookie set on a real, uncontrollable request to Instagram.
+  // Intentional skip, never a failure - account/profile/already-imported
+  // cookies remain exactly as created above (no rollback). Every other
+  // platform, and any Instagram record with zero missing critical cookies
+  // (including a JSON/Netscape import that already has a complete real
+  // browser-cookie set), is completely unaffected - falls through to the
+  // existing verify path below unchanged.
+  const missingCriticalInstagramCookies = record.platform === "instagram" && record.cookies && sessionIntegrity
+    ? [...CRITICAL_INSTAGRAM_COOKIES].filter((name) => !(sessionIntegrity.criticalNames || []).some((found) => found.toLowerCase() === name))
+    : [];
+
+  if (missingCriticalInstagramCookies.length) {
+    sessionLabel = "Skipped (incomplete cookie set)";
+    // Legacy 4-value import-report bucket (see mapToPipelineStatus's own
+    // UNKNOWN -> NEEDS_LOGIN precedent) - the account's real PERSISTED
+    // coarse status is set separately below via persistSessionStatus's
+    // richer "UNKNOWN" entry, not this value.
+    status = "NEEDS_LOGIN";
+    // Names only - never a cookie value, never the raw supplier block.
+    reason = `session verification skipped: incomplete Instagram browser-cookie set (missing critical cookie: ${missingCriticalInstagramCookies.join(", ")})`;
+    sessionState = "UNKNOWN";
+    await persistSessionStatus(accountId, "UNKNOWN", reason, { state: sessionState, attempts: null });
+  } else if (verify) {
     let session = null;
     try {
       session = await persona.attachPersonaProfile(profileId, { headless: true });

@@ -62,6 +62,98 @@ test("returns null for a header-style string with no valid name=value pairs at a
   assert.equal(toPersonaCookiePayload("this is not cookie data", "tiktok"), null);
 });
 
+// --- Instagram-only browser-cookie allowlist (2026-08-27, real supplier
+// finding - instagram-android-session-v1) -----------------------------
+// A header-style Instagram session block may mix real browser-cookie names
+// with Instagram's own private/mobile-API authorization headers, which
+// must never become Chromium cookies. Scoped strictly to platform ===
+// "instagram" - every other platform is unaffected (see the TikTok tests
+// above and the explicit regression test at the end of this section).
+
+const REAL_ANDROID_SESSION_BLOCK =
+  "Authorization=Bearer FAKE:JWT:TOKEN:VALUE1;X-MID=FAKE_MID_0001;IG-U-DS-USER-ID=1000000001;IG-U-RUR=FAKE_RUR_0001;X-IG-WWW-Claim=FAKE_CLAIM_0001;csrftoken=fakecsrftoken0001;sessionid=fakesessionid0001";
+
+test("(A) Authorization never becomes a browser cookie for Instagram", () => {
+  const payload = toPersonaCookiePayload(REAL_ANDROID_SESSION_BLOCK, "instagram");
+  assert.equal(payload.cookies.some((c) => c.name === "Authorization"), false);
+});
+
+test("(B) X-MID never becomes a browser cookie for Instagram", () => {
+  const payload = toPersonaCookiePayload(REAL_ANDROID_SESSION_BLOCK, "instagram");
+  assert.equal(payload.cookies.some((c) => c.name === "X-MID"), false);
+});
+
+test("(C) IG-U-DS-USER-ID never becomes a browser cookie for Instagram", () => {
+  const payload = toPersonaCookiePayload(REAL_ANDROID_SESSION_BLOCK, "instagram");
+  assert.equal(payload.cookies.some((c) => c.name === "IG-U-DS-USER-ID"), false);
+});
+
+test("(D) IG-U-RUR never becomes a browser cookie for Instagram", () => {
+  const payload = toPersonaCookiePayload(REAL_ANDROID_SESSION_BLOCK, "instagram");
+  assert.equal(payload.cookies.some((c) => c.name === "IG-U-RUR"), false);
+});
+
+test("(E) X-IG-WWW-Claim never becomes a browser cookie for Instagram", () => {
+  const payload = toPersonaCookiePayload(REAL_ANDROID_SESSION_BLOCK, "instagram");
+  assert.equal(payload.cookies.some((c) => c.name === "X-IG-WWW-Claim"), false);
+});
+
+test("(F) sessionid becomes a real browser cookie for Instagram", () => {
+  const payload = toPersonaCookiePayload(REAL_ANDROID_SESSION_BLOCK, "instagram");
+  const cookie = payload.cookies.find((c) => c.name === "sessionid");
+  assert.ok(cookie);
+  assert.equal(cookie.domain, ".instagram.com");
+});
+
+test("(G) csrftoken becomes a real browser cookie for Instagram", () => {
+  const payload = toPersonaCookiePayload(REAL_ANDROID_SESSION_BLOCK, "instagram");
+  const cookie = payload.cookies.find((c) => c.name === "csrftoken");
+  assert.ok(cookie);
+  assert.equal(cookie.domain, ".instagram.com");
+});
+
+test("(H) ds_user_id name-for-name becomes a browser cookie when it is actually present under that exact name", () => {
+  const payload = toPersonaCookiePayload("sessionid=fakeSess1;csrftoken=fakeCsrf1;ds_user_id=1000000099", "instagram");
+  assert.equal(payload.cookies.length, 3);
+  assert.ok(payload.cookies.some((c) => c.name === "ds_user_id"));
+});
+
+test("(I) IG-U-DS-USER-ID is never renamed/mapped to ds_user_id - only the real supplier field name is checked, nothing is invented", () => {
+  const payload = toPersonaCookiePayload(REAL_ANDROID_SESSION_BLOCK, "instagram");
+  assert.equal(payload.cookies.some((c) => c.name === "ds_user_id"), false, "no cookie named ds_user_id must be fabricated from IG-U-DS-USER-ID");
+  assert.equal(payload.cookies.length, 2, "only sessionid and csrftoken survive filtering for this real supplier block");
+});
+
+test("filtering the android-session block down to zero allowlisted names returns null, exactly like any other unusable cookie data", () => {
+  assert.equal(toPersonaCookiePayload("Authorization=Bearer FAKE;X-MID=FAKE_MID", "instagram"), null);
+});
+
+// (Q) TikTok/YouTube header-style cookies are completely unaffected by the
+// Instagram-only allowlist - explicit regression lock on top of the
+// existing "tiktok" tests above (which never exercised platform ===
+// "instagram" at all, so were already implicitly unaffected; this test
+// additionally proves a TikTok-shaped name that would NOT be on the
+// Instagram allowlist still survives for its own platform).
+test("(Q) TikTok/YouTube header-style cookie names are never filtered by the Instagram-only allowlist", () => {
+  const tiktokPayload = toPersonaCookiePayload("sessionid=fakeVal1; sid_guard=fakeVal2; uid_tt=fakeVal3", "tiktok");
+  assert.equal(tiktokPayload.cookies.length, 3, "sid_guard/uid_tt are not on the Instagram allowlist but must still survive for tiktok");
+  const youtubePayload = toPersonaCookiePayload("SID=fakeVal1; HSID=fakeVal2", "youtube");
+  assert.equal(youtubePayload.cookies.length, 2);
+});
+
+// (R) No secret leakage - filtering must never surface a dropped cookie's
+// VALUE anywhere, including in the returned payload for the names that ARE
+// kept.
+test("(R) filtered-out cookie values never appear anywhere in the returned payload", () => {
+  const payload = toPersonaCookiePayload(REAL_ANDROID_SESSION_BLOCK, "instagram");
+  const serialized = JSON.stringify(payload);
+  assert.equal(serialized.includes("FAKE_MID_0001"), false);
+  assert.equal(serialized.includes("1000000001"), false);
+  assert.equal(serialized.includes("FAKE_RUR_0001"), false);
+  assert.equal(serialized.includes("FAKE_CLAIM_0001"), false);
+  assert.equal(serialized.includes("FAKE:JWT:TOKEN:VALUE1"), false);
+});
+
 // --- AUTOSOCIAL_HEADER_COOKIE_TTL_SECONDS override validation -----------
 // Regression coverage for a real reviewer finding: an invalid override
 // must never silently win, because a NaN/zero/negative expires reproduces
