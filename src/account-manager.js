@@ -141,6 +141,23 @@ function normalizeIsoTimestamp(value) {
   return Number.isNaN(d.getTime()) ? null : d.toISOString();
 }
 
+function normalizeCookieIntegrity(value) {
+  if (!value || typeof value !== "object") return null;
+  const out = {};
+  if (typeof value.platform === "string") out.platform = normalizeSafeText(value.platform, 30);
+  if (Number.isFinite(value.count)) out.count = Math.max(0, Math.floor(value.count));
+  if (Array.isArray(value.domains)) out.domains = value.domains.filter((v) => typeof v === "string").slice(0, 20);
+  if (Array.isArray(value.names)) out.names = value.names.filter((v) => typeof v === "string").slice(0, 80);
+  if (Array.isArray(value.criticalNames)) out.criticalNames = value.criticalNames.filter((v) => typeof v === "string").slice(0, 20);
+  if (Number.isFinite(value.criticalCount)) out.criticalCount = Math.max(0, Math.floor(value.criticalCount));
+  if (Number.isFinite(value.expiredCount)) out.expiredCount = Math.max(0, Math.floor(value.expiredCount));
+  if (Number.isFinite(value.sessionCookieCount)) out.sessionCookieCount = Math.max(0, Math.floor(value.sessionCookieCount));
+  if (typeof value.fingerprint === "string" && /^[a-f0-9]{64}$/i.test(value.fingerprint)) out.fingerprint = value.fingerprint.toLowerCase();
+  const analyzedAt = normalizeIsoTimestamp(value.analyzedAt);
+  if (analyzedAt) out.analyzedAt = analyzedAt;
+  return Object.keys(out).length ? out : null;
+}
+
 function normalizeAccount(item) {
   const account = { id: item.id, name: item.name };
   const personaProfileId = normalizePersonaProfileId(item.personaProfileId);
@@ -153,6 +170,16 @@ function normalizeAccount(item) {
   const importUsername = normalizeSourceField(item.importUsername);
   if (importPlatform) account.importPlatform = importPlatform;
   if (importUsername) account.importUsername = importUsername;
+  const importedAt = normalizeIsoTimestamp(item.importedAt);
+  if (importedAt) account.importedAt = importedAt;
+  const supplierFormat = normalizeSourceField(item.supplierFormat);
+  if (supplierFormat) account.supplierFormat = supplierFormat;
+  const supplierBatchId = normalizeSourceField(item.supplierBatchId);
+  if (supplierBatchId) account.supplierBatchId = supplierBatchId;
+  const sessionSource = normalizeSourceField(item.sessionSource);
+  if (sessionSource) account.sessionSource = sessionSource;
+  const cookieIntegrity = normalizeCookieIntegrity(item.cookieIntegrity);
+  if (cookieIntegrity) account.cookieIntegrity = cookieIntegrity;
 
   // Safe, non-secret operational status - last known verified social
   // session health and last publish outcome. Set by session-check.js
@@ -173,6 +200,19 @@ function normalizeAccount(item) {
   if (sessionState) account.sessionState = sessionState;
   const sessionRecoveryAttempts = normalizeRecoveryAttempts(item.sessionRecoveryAttempts);
   if (sessionRecoveryAttempts) account.sessionRecoveryAttempts = sessionRecoveryAttempts;
+  const firstVerifiedAt = normalizeIsoTimestamp(item.firstVerifiedAt);
+  if (firstVerifiedAt) account.firstVerifiedAt = firstVerifiedAt;
+  const lastReadyAt = normalizeIsoTimestamp(item.lastReadyAt);
+  if (lastReadyAt) account.lastReadyAt = lastReadyAt;
+  const healthState = normalizeSafeText(item.healthState, 40);
+  if (healthState) account.healthState = healthState;
+  const failureClass = normalizeSafeText(item.failureClass, 80);
+  if (failureClass) account.failureClass = failureClass;
+  const quarantineReason = normalizeSafeText(item.quarantineReason);
+  if (quarantineReason) account.quarantineReason = quarantineReason;
+  const quarantinedAt = normalizeIsoTimestamp(item.quarantinedAt);
+  if (quarantinedAt) account.quarantinedAt = quarantinedAt;
+  if (Number.isFinite(item.failureCount) && item.failureCount >= 0) account.failureCount = Math.floor(item.failureCount);
 
   const lastPublishStatus = normalizeEnum(item.lastPublishStatus, PUBLISH_STATUS_VALUES);
   if (lastPublishStatus) account.lastPublishStatus = lastPublishStatus;
@@ -315,6 +355,12 @@ async function addAccount(name, extra = {}) {
   const importUsername = normalizeSourceField(extra.importUsername);
   if (importPlatform) account.importPlatform = importPlatform;
   if (importUsername) account.importUsername = importUsername;
+  for (const field of ["importedAt", "supplierFormat", "supplierBatchId", "sessionSource"]) {
+    const value = normalizeSourceField(extra[field]);
+    if (value) account[field] = value;
+  }
+  const cookieIntegrity = normalizeCookieIntegrity(extra.cookieIntegrity);
+  if (cookieIntegrity) account.cookieIntegrity = cookieIntegrity;
   state.accounts.push(account);
   state.activeAccountId = account.id;
   await saveState();
@@ -478,6 +524,29 @@ async function setSessionStatus(accountId, { status, reason, checkedAt, state: s
   if (normalizedState) target.sessionState = normalizedState;
   const normalizedAttempts = normalizeRecoveryAttempts(attempts);
   if (normalizedAttempts) target.sessionRecoveryAttempts = normalizedAttempts;
+  const checked = target.sessionCheckedAt;
+  if (!target.firstVerifiedAt) target.firstVerifiedAt = checked;
+  if (status === "ready") {
+    target.lastReadyAt = checked;
+    target.healthState = "READY";
+    delete target.failureClass;
+    delete target.quarantineReason;
+    delete target.quarantinedAt;
+  } else {
+    target.failureCount = (Number.isFinite(target.failureCount) ? target.failureCount : 0) + 1;
+    if (status === "challenge_required" || sessionState === "ACCOUNT_SUSPENDED") {
+      target.healthState = "QUARANTINED";
+      target.failureClass = sessionState || "CHALLENGE_REQUIRED";
+      target.quarantineReason = safeReason || "Account requires operator review before use.";
+      target.quarantinedAt = target.quarantinedAt || checked;
+    } else if (status === "needs_login") {
+      target.healthState = "LOGIN_REQUIRED";
+      target.failureClass = sessionState || "LOGIN_REQUIRED";
+    } else {
+      target.healthState = "UNKNOWN";
+      target.failureClass = sessionState || status.toUpperCase();
+    }
+  }
   await saveState();
   return clone(target);
 }

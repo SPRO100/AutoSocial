@@ -51,6 +51,7 @@ const { detectFormat } = require("./importers/detector");
 const manualMapping = require("./importers/manual-mapping");
 const templateStore = require("./importers/template-store");
 const { buildPreview, importBatch, selectRecords } = require("./importers/pipeline");
+const { healthForAccount, qualitySummary, FRESHNESS_MS } = require("./account-health");
 const uploadStore = require("./importers/upload-store");
 const accountDeletion = require("./account-deletion");
 const sessionCheck = require("./session-check");
@@ -627,6 +628,18 @@ async function createServer() {
           // recoverable states).
           sessionState: account.sessionState || null,
           sessionRecoveryAttempts: account.sessionRecoveryAttempts || null,
+          importedAt: account.importedAt || null,
+          supplierFormat: account.supplierFormat || null,
+          supplierBatchId: account.supplierBatchId || null,
+          sessionSource: account.sessionSource || null,
+          cookieIntegrity: account.cookieIntegrity || null,
+          firstVerifiedAt: account.firstVerifiedAt || null,
+          lastReadyAt: account.lastReadyAt || null,
+          health: { ...healthForAccount(account), lastCheckedAt: account.sessionCheckedAt || null },
+          failureCount: account.failureCount || 0,
+          failureClass: account.failureClass || null,
+          quarantineReason: account.quarantineReason || null,
+          quarantinedAt: account.quarantinedAt || null,
           lastPublishStatus: account.lastPublishStatus || null,
           lastPublishAt: account.lastPublishAt || null,
           lastPublishError: account.lastPublishError || null,
@@ -639,6 +652,39 @@ async function createServer() {
       personaApiAvailable: profiles !== null,
       personaApiError,
       accounts: accountRows,
+    });
+  });
+
+  // Read-only operational projection for supplier/account quality. It is
+  // intentionally separate from the account CRUD response so consumers can
+  // render compact health summaries without receiving credentials.
+  app.get("/api/accounts/health", async (req, res) => {
+    const accounts = await getAllAccounts();
+    res.json({
+      ok: true,
+      freshnessMs: FRESHNESS_MS,
+      accounts: accounts.filter((account) => account.importPlatform).map((account) => ({
+        id: account.id,
+        name: account.name,
+        platform: account.importPlatform,
+        importedAt: account.importedAt || null,
+        supplierFormat: account.supplierFormat || null,
+        supplierBatchId: account.supplierBatchId || null,
+        sessionSource: account.sessionSource || null,
+        cookieIntegrity: account.cookieIntegrity || null,
+        firstVerifiedAt: account.firstVerifiedAt || null,
+        lastReadyAt: account.lastReadyAt || null,
+        sessionStatus: account.sessionStatus || "unknown",
+        sessionState: account.sessionState || null,
+        sessionCheckedAt: account.sessionCheckedAt || null,
+        sessionReason: account.sessionReason || null,
+        health: healthForAccount(account),
+        failureCount: account.failureCount || 0,
+        failureClass: account.failureClass || null,
+        quarantineReason: account.quarantineReason || null,
+        quarantinedAt: account.quarantinedAt || null,
+      })),
+      quality: qualitySummary(accounts),
     });
   });
 
@@ -772,7 +818,11 @@ async function createServer() {
       }
       const selectedKeySet = new Set(selectedRecords.map((record) => `${String(record.platform).toLowerCase()}:${String(record.username).toLowerCase()}`));
       const selectedUpdateSessionKeys = updateSessionKeys.filter((key) => selectedKeySet.has(key.toLowerCase()));
-      const report = await importBatch(selectedRecords, { concurrency, updateSessionKeys: selectedUpdateSessionKeys });
+      const report = await importBatch(selectedRecords, {
+        concurrency,
+        updateSessionKeys: selectedUpdateSessionKeys,
+        importMeta: { ...(entry.meta || {}), batchId: importId, importedAt: new Date().toISOString() },
+      });
       for (const result of report.results) {
         if (result.accountId) {
           try {

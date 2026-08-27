@@ -19,6 +19,7 @@ const accountManager = require("../account-manager");
 const persona = require("../persona-browser");
 const { toSafePreview, duplicateKey } = require("./normalize");
 const { toPersonaCookiePayload } = require("./cookie-adapter");
+const { analyzeCookieSet } = require("../account-health");
 const credentialVault = require("../security/credential-vault");
 const { recoverSession, mapToPipelineStatus, mapToSessionStatus } = require("../session-recovery");
 
@@ -298,7 +299,7 @@ async function updateExistingAccountSession(existingAccount, record) {
   };
 }
 
-async function processRecord(record, updateSessionKeys) {
+async function processRecord(record, updateSessionKeys, importMeta = {}) {
   const base = { platform: record.platform, username: record.username };
 
   if (record.platform && record.username) {
@@ -330,6 +331,11 @@ async function processRecord(record, updateSessionKeys) {
     const account = await accountManager.addAccount(record.username, {
       importPlatform: record.platform,
       importUsername: record.username,
+      importedAt: importMeta.importedAt || new Date().toISOString(),
+      supplierFormat: importMeta.format || null,
+      supplierBatchId: importMeta.batchId || null,
+      sessionSource: record.cookies ? "supplier_cookie_bundle" : "credentials_only",
+      cookieIntegrity: record.cookies ? analyzeCookieSet(record.cookies, record.platform) : null,
     });
     accountId = account.id;
   } catch (error) {
@@ -521,15 +527,15 @@ function duplicateSkipResult(record, reason) {
 // same (platform, username) - whether both are new imports, both are
 // update-session calls, or one of each - can never both proceed against
 // the same Persona profile at once.
-async function claimAndProcess(record, updateSessionKeys) {
+async function claimAndProcess(record, updateSessionKeys, importMeta) {
   const key = duplicateKey(record);
-  if (!key) return processRecord(record, updateSessionKeys);
+  if (!key) return processRecord(record, updateSessionKeys, importMeta);
   if (activeImportKeys.has(key)) {
     return duplicateSkipResult(record, "this platform/username is already being imported or updated by another in-flight request");
   }
   activeImportKeys.add(key);
   try {
-    return await processRecord(record, updateSessionKeys);
+    return await processRecord(record, updateSessionKeys, importMeta);
   } finally {
     activeImportKeys.delete(key);
   }
@@ -545,7 +551,7 @@ async function claimAndProcess(record, updateSessionKeys) {
 // caller wants to run Update Session for. Anything not in this list stays
 // the existing, safe default (SKIPPED_DUPLICATE) - Update Session is never
 // applied automatically to every duplicate in a batch.
-async function importBatch(records, { concurrency = DEFAULT_CONCURRENCY, updateSessionKeys = [] } = {}) {
+async function importBatch(records, { concurrency = DEFAULT_CONCURRENCY, updateSessionKeys = [], importMeta = {} } = {}) {
   const limit = Math.min(MAX_CONCURRENCY, Math.max(1, Number(concurrency) || DEFAULT_CONCURRENCY));
   const updateSet = new Set(Array.isArray(updateSessionKeys) ? updateSessionKeys : []);
   const results = new Array(records.length);
@@ -558,7 +564,7 @@ async function importBatch(records, { concurrency = DEFAULT_CONCURRENCY, updateS
       if (index >= records.length) return;
       const record = records[index];
       try {
-        results[index] = await claimAndProcess(record, updateSet);
+        results[index] = await claimAndProcess(record, updateSet, importMeta);
       } catch (error) {
         // processRecord already catches its own known failure points; this
         // is a last-resort net so one unexpected exception can never abort
