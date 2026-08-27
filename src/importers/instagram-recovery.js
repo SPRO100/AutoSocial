@@ -43,41 +43,83 @@ const COOKIE_CONSENT_BUTTON_PATTERNS = [
 // Searches buttons/links/role=button elements for the first one whose
 // visible text matches, in COOKIE_CONSENT_BUTTON_PATTERNS order (not DOM
 // order) - so the preferred, more conservative option is chosen even if it
-// happens to render second. Returns null (never throws) if nothing
-// recognizable is found, so the caller can fail closed instead of guessing.
+// happens to render second. Returns { match: null, texts } (never throws)
+// if nothing recognizable is found, so the caller can fail closed instead
+// of guessing - `texts` is a bounded, deduplicated sample of what WAS
+// actually on the page (Recovery V2, 2026-08-27 - real incident:
+// bruna731302 hit exactly this "nothing recognized" path with zero
+// captured evidence of what it actually saw, which permanently blocked any
+// future fix of the pattern list; diagnostic only, never used to decide
+// what is safe to click).
 async function findCookieConsentButton(page) {
   const candidates = page.locator('button, [role="button"], a');
   const count = await candidates.count().catch(() => 0);
-  if (!count) return null;
+  if (!count) return { match: null, texts: [] };
 
-  const texts = [];
+  const rawTexts = [];
   for (let i = 0; i < count; i += 1) {
     const text = await candidates.nth(i).innerText().catch(() => "");
-    texts.push(String(text || "").trim());
+    rawTexts.push(String(text || "").trim());
   }
 
   for (const pattern of COOKIE_CONSENT_BUTTON_PATTERNS) {
-    const index = texts.findIndex((text) => text && pattern.test(text));
-    if (index >= 0) return { locator: candidates.nth(index), matchedText: texts[index] };
+    const index = rawTexts.findIndex((text) => text && pattern.test(text));
+    if (index >= 0) return { match: { locator: candidates.nth(index), matchedText: rawTexts[index] }, texts: [] };
   }
-  return null;
+  const sample = [...new Set(rawTexts.filter(Boolean))].slice(0, 4);
+  return { match: null, texts: sample };
 }
 
-// Returns { performed, action, detail } - performed:false (with a
-// diagnostic detail, never a raw page dump) whenever nothing safe to click
-// was found, so the orchestrator can distinguish "we tried and there was
-// genuinely nothing recognizable" from "we tried and clicked something".
-async function performCookieConsent(page) {
-  const found = await findCookieConsentButton(page);
-  if (!found) {
-    return { performed: false, action: "cookie_consent", detail: "no recognized cookie-consent control found on the page" };
+// Returns { performed, action, detail, transitionObserved?, transitionElapsedMs? }
+// - performed:false (with a diagnostic detail, never a raw page dump)
+// whenever nothing safe to click was found, so the orchestrator can
+// distinguish "we tried and there was genuinely nothing recognizable" from
+// "we tried and clicked something".
+//
+// Recovery V2 (2026-08-27+): after a real click, best-effort BOUNDED wait
+// for the exact element we just clicked to leave the DOM - a direct,
+// evidence-grounded proxy for "the consent flow visibly resolved", without
+// guessing at what replaces it or inventing any new selector. Bounded by
+// the caller's own settle budget (transitionWaitMs, the same
+// AUTOSOCIAL_RECOVERY_SETTLE_DELAY_MS-controlled value session-recovery.js
+// already uses) so this can never add unbounded latency. Never throws,
+// never retried, never re-clicked - a timeout here just means
+// transitionObserved:false, which session-recovery.js falls back to
+// treating exactly like Recovery V1 (sleep its own full settle window).
+async function performCookieConsent(page, { transitionWaitMs = 0 } = {}) {
+  const { match, texts } = await findCookieConsentButton(page);
+  if (!match) {
+    const suffix = texts.length
+      ? `; observed candidates: ${texts.map((t) => JSON.stringify(t.slice(0, 30))).join(", ")}`
+      : "";
+    return { performed: false, action: "cookie_consent", detail: `no recognized cookie-consent control found on the page${suffix}` };
   }
   try {
-    await found.locator.click({ timeout: 5000 });
-    return { performed: true, action: "cookie_consent", detail: `clicked control matching "${found.matchedText.slice(0, 60)}"` };
+    await match.locator.click({ timeout: 5000 });
   } catch (error) {
     return { performed: false, action: "cookie_consent", detail: `click failed: ${error.message}` };
   }
+
+  const transitionStarted = Date.now();
+  let transitionObserved = false;
+  if (transitionWaitMs > 0) {
+    try {
+      await match.locator.waitFor({ state: "detached", timeout: transitionWaitMs });
+      transitionObserved = true;
+    } catch {
+      // Bounded, best-effort only - still attached (or the check itself
+      // failed) after the wait. session-recovery.js's own fixed buffer
+      // covers the remainder; never retried or re-clicked here.
+    }
+  }
+
+  return {
+    performed: true,
+    action: "cookie_consent",
+    detail: `clicked control matching "${match.matchedText.slice(0, 60)}"`,
+    transitionObserved,
+    transitionElapsedMs: Date.now() - transitionStarted,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -98,8 +140,12 @@ function getPrivacyChoicePolicy() {
   return { configured: Boolean(raw), value: raw || null };
 }
 
-async function attemptRecovery(page, state) {
-  if (state === STATES.COOKIE_CONSENT_REQUIRED) return performCookieConsent(page);
+// options.transitionWaitMs: forwarded from session-recovery.js's own
+// settleDelayMs (Recovery V2) - see performCookieConsent's header comment.
+// Any recovery action that doesn't use it (there is currently only one)
+// simply ignores the option.
+async function attemptRecovery(page, state, options = {}) {
+  if (state === STATES.COOKIE_CONSENT_REQUIRED) return performCookieConsent(page, options);
   return { performed: false, action: "none", detail: `no automated recovery action exists for state ${state}` };
 }
 

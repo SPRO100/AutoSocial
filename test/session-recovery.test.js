@@ -29,13 +29,16 @@ function scriptedVerify(sequence) {
 
 function fakeRecover(recoverableStates, actionImpl) {
   const attempts = [];
+  const optionsSeen = [];
   return {
     SAFE_RECOVERABLE_STATES: new Set(recoverableStates),
-    attemptRecovery: async (page, state) => {
+    attemptRecovery: async (page, state, options) => {
       attempts.push(state);
-      return actionImpl ? actionImpl(state) : { performed: true, action: "fake_action", detail: "ok" };
+      optionsSeen.push(options);
+      return actionImpl ? actionImpl(state, options) : { performed: true, action: "fake_action", detail: "ok" };
     },
     attempts,
+    optionsSeen,
   };
 }
 
@@ -326,6 +329,141 @@ test("settleDelayMs:0 disables the delay explicitly, independent of the env defa
   const result = await recoverSession({ verify, recover, page: {}, username: "u", settleDelayMs: 0 });
   assert.equal(result.state, "READY");
   assert.ok(Date.now() - start < 200, "an explicit settleDelayMs:0 must not add any real delay");
+});
+
+// --- Recovery V2 (2026-08-27+): bounded transition-aware settle timing ---
+
+test("attemptRecovery is called with transitionWaitMs equal to the configured settle budget", async () => {
+  const settleMs = 40;
+  process.env.AUTOSOCIAL_RECOVERY_SETTLE_DELAY_MS = String(settleMs);
+  delete require.cache[require.resolve("../src/session-recovery")];
+  const { recoverSession: recoverSessionWithDelay } = require("../src/session-recovery");
+  try {
+    const { verify } = scriptedVerify([
+      { active: false, state: "COOKIE_CONSENT_REQUIRED", reason: "banner", url: "https://ig/consent/?flow=user_cookie_choice_v2" },
+      { active: true, state: "READY", reason: "ok", url: "https://ig/" },
+    ]);
+    const recover = fakeRecover(["COOKIE_CONSENT_REQUIRED"]);
+    await recoverSessionWithDelay({ verify, recover, page: {}, username: "u" });
+    assert.equal(recover.optionsSeen.length, 1);
+    assert.deepEqual(recover.optionsSeen[0], { transitionWaitMs: settleMs });
+  } finally {
+    delete process.env.AUTOSOCIAL_RECOVERY_SETTLE_DELAY_MS;
+    delete require.cache[require.resolve("../src/session-recovery")];
+  }
+});
+
+test("a CONFIRMED transition (transitionObserved:true) shortens the wait to the small fixed buffer instead of the full settle window", async () => {
+  const settleMs = 500;
+  process.env.AUTOSOCIAL_RECOVERY_SETTLE_DELAY_MS = String(settleMs);
+  delete require.cache[require.resolve("../src/session-recovery")];
+  const { recoverSession: recoverSessionWithDelay } = require("../src/session-recovery");
+  try {
+    const timestamps = [];
+    const { verify } = scriptedVerify([
+      { active: false, state: "COOKIE_CONSENT_REQUIRED", reason: "banner", url: "https://ig/consent/?flow=user_cookie_choice_v2" },
+      { active: true, state: "READY", reason: "ok", url: "https://ig/" },
+    ]);
+    const timedVerify = async (...args) => { timestamps.push(Date.now()); return verify(...args); };
+    const recover = fakeRecover(["COOKIE_CONSENT_REQUIRED"], () => ({ performed: true, action: "cookie_consent", detail: "clicked", transitionObserved: true, transitionElapsedMs: 5 }));
+    const start = Date.now();
+    const result = await recoverSessionWithDelay({ verify: timedVerify, recover, page: {}, username: "u" });
+    assert.equal(result.state, "READY");
+    const elapsed = Date.now() - start;
+    assert.ok(elapsed < settleMs, `a confirmed transition must wait far less than the full ${settleMs}ms settle window, took ${elapsed}ms`);
+  } finally {
+    delete process.env.AUTOSOCIAL_RECOVERY_SETTLE_DELAY_MS;
+    delete require.cache[require.resolve("../src/session-recovery")];
+  }
+});
+
+test("NO transition observed (transitionObserved:false) still waits the FULL settle window - identical to V1, never weaker", async () => {
+  const settleMs = 60;
+  process.env.AUTOSOCIAL_RECOVERY_SETTLE_DELAY_MS = String(settleMs);
+  delete require.cache[require.resolve("../src/session-recovery")];
+  const { recoverSession: recoverSessionWithDelay } = require("../src/session-recovery");
+  try {
+    const timestamps = [];
+    const { verify } = scriptedVerify([
+      { active: false, state: "COOKIE_CONSENT_REQUIRED", reason: "banner", url: "https://ig/consent/?flow=user_cookie_choice_v2" },
+      { active: true, state: "READY", reason: "ok", url: "https://ig/" },
+    ]);
+    const timedVerify = async (...args) => { timestamps.push(Date.now()); return verify(...args); };
+    const recover = fakeRecover(["COOKIE_CONSENT_REQUIRED"], () => ({ performed: true, action: "cookie_consent", detail: "clicked", transitionObserved: false, transitionElapsedMs: 60 }));
+    const result = await recoverSessionWithDelay({ verify: timedVerify, recover, page: {}, username: "u" });
+    assert.equal(result.state, "READY");
+    const elapsed = timestamps[1] - timestamps[0];
+    assert.ok(elapsed >= settleMs, `expected the full ${settleMs}ms settle window when no transition was observed, got ${elapsed}ms`);
+  } finally {
+    delete process.env.AUTOSOCIAL_RECOVERY_SETTLE_DELAY_MS;
+    delete require.cache[require.resolve("../src/session-recovery")];
+  }
+});
+
+test("a recovery module that never reports transitionObserved at all (e.g. a future/other platform) falls back to the full settle window - fully backward compatible", async () => {
+  const settleMs = 60;
+  process.env.AUTOSOCIAL_RECOVERY_SETTLE_DELAY_MS = String(settleMs);
+  delete require.cache[require.resolve("../src/session-recovery")];
+  const { recoverSession: recoverSessionWithDelay } = require("../src/session-recovery");
+  try {
+    const timestamps = [];
+    const { verify } = scriptedVerify([
+      { active: false, state: "COOKIE_CONSENT_REQUIRED", reason: "banner", url: "https://ig/consent/?flow=user_cookie_choice_v2" },
+      { active: true, state: "READY", reason: "ok", url: "https://ig/" },
+    ]);
+    const timedVerify = async (...args) => { timestamps.push(Date.now()); return verify(...args); };
+    const recover = fakeRecover(["COOKIE_CONSENT_REQUIRED"]); // default actionImpl - no transitionObserved field at all
+    const result = await recoverSessionWithDelay({ verify: timedVerify, recover, page: {}, username: "u" });
+    assert.equal(result.state, "READY");
+    const elapsed = timestamps[1] - timestamps[0];
+    assert.ok(elapsed >= settleMs, `expected the full ${settleMs}ms settle window when transitionObserved is unreported, got ${elapsed}ms`);
+  } finally {
+    delete process.env.AUTOSOCIAL_RECOVERY_SETTLE_DELAY_MS;
+    delete require.cache[require.resolve("../src/session-recovery")];
+  }
+});
+
+test("settleDelayMs:0 stays exactly zero wait even when transitionObserved:true - explicit disable always wins", async () => {
+  const start = Date.now();
+  const { verify } = scriptedVerify([
+    { active: false, state: "COOKIE_CONSENT_REQUIRED", reason: "banner", url: "https://ig/consent/?flow=user_cookie_choice_v2" },
+    { active: true, state: "READY", reason: "ok", url: "https://ig/" },
+  ]);
+  const recover = fakeRecover(["COOKIE_CONSENT_REQUIRED"], () => ({ performed: true, action: "cookie_consent", detail: "clicked", transitionObserved: true, transitionElapsedMs: 1 }));
+  const result = await recoverSession({ verify, recover, page: {}, username: "u", settleDelayMs: 0 });
+  assert.equal(result.state, "READY");
+  assert.ok(Date.now() - start < 100, "settleDelayMs:0 must never add any wait, even with a confirmed transition");
+});
+
+test("recorded attempts persist transitionObserved/transitionElapsedMs when reported, and null when not", async () => {
+  const { verify } = scriptedVerify([
+    { active: false, state: "COOKIE_CONSENT_REQUIRED", reason: "banner", url: "https://ig/consent/?flow=user_cookie_choice_v2" },
+    { active: true, state: "READY", reason: "ok", url: "https://ig/" },
+  ]);
+  const recover = fakeRecover(["COOKIE_CONSENT_REQUIRED"], () => ({ performed: true, action: "cookie_consent", detail: "clicked", transitionObserved: true, transitionElapsedMs: 42 }));
+  const result = await recoverSession({ verify, recover, page: {}, username: "u" });
+  assert.equal(result.attempts[0].transitionObserved, true);
+  assert.equal(result.attempts[0].transitionElapsedMs, 42);
+  // The final READY attempt has no action at all - both fields must be
+  // null, never undefined-vs-null inconsistency and never a stale carry-
+  // over from the previous attempt's action.
+  assert.equal(result.attempts[1].transitionObserved, null);
+  assert.equal(result.attempts[1].transitionElapsedMs, null);
+});
+
+test("loop-detection reason distinguishes a confirmed-transition repeat from a no-observed-change repeat, without changing the STOP decision itself", async () => {
+  const same = { active: false, state: "COOKIE_CONSENT_REQUIRED", reason: "banner", url: "https://ig/consent/?flow=user_cookie_choice_v2" };
+  const { verify: verifyObserved } = scriptedVerify([same, same]);
+  const observedRecover = fakeRecover(["COOKIE_CONSENT_REQUIRED"], () => ({ performed: true, action: "cookie_consent", detail: "clicked", transitionObserved: true, transitionElapsedMs: 10 }));
+  const observedResult = await recoverSession({ verify: verifyObserved, recover: observedRecover, page: {}, username: "u" });
+  assert.equal(observedResult.state, "REDIRECT_LOOP");
+  assert.match(observedResult.reason, /confirmed page update/i);
+
+  const { verify: verifyUnobserved } = scriptedVerify([same, same]);
+  const unobservedRecover = fakeRecover(["COOKIE_CONSENT_REQUIRED"], () => ({ performed: true, action: "cookie_consent", detail: "clicked", transitionObserved: false, transitionElapsedMs: 10 }));
+  const unobservedResult = await recoverSession({ verify: verifyUnobserved, recover: unobservedRecover, page: {}, username: "u" });
+  assert.equal(unobservedResult.state, "REDIRECT_LOOP");
+  assert.match(unobservedResult.reason, /no observed page change/i);
 });
 
 test("a real click's own promise resolving is never treated as recovery success by itself - only the NEXT verify call's classification decides that", async () => {

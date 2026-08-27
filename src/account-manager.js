@@ -96,6 +96,12 @@ function normalizeRecoveryAttempt(item) {
   if (typeof item.actionPerformed === "boolean") attempt.actionPerformed = item.actionPerformed;
   const actionDetail = normalizeSafeText(item.actionDetail, 200);
   if (actionDetail) attempt.actionDetail = actionDetail;
+  // Recovery V2 (2026-08-27+) diagnostic fields - see session-recovery.js's
+  // recordAttempt. Same allowlist pattern as every other field here: must
+  // be added explicitly or normalizeEnum-style stripping silently drops
+  // them even though they were computed correctly upstream.
+  if (typeof item.transitionObserved === "boolean") attempt.transitionObserved = item.transitionObserved;
+  if (typeof item.transitionElapsedMs === "number" && Number.isFinite(item.transitionElapsedMs)) attempt.transitionElapsedMs = item.transitionElapsedMs;
   const result = normalizeSafeText(item.result, 60);
   if (result) attempt.result = result;
   const reason = normalizeSafeText(item.reason, 300);

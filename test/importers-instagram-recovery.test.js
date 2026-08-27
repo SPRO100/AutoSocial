@@ -4,8 +4,13 @@ const { SAFE_RECOVERABLE_STATES, attemptRecovery, getPrivacyChoicePolicy } = req
 
 // Minimal fake Playwright Page exposing only what instagram-recovery.js
 // actually calls: page.locator(selector) -> { count(), nth(i) -> {
-// innerText(), click() } }.
-function makePageWithButtons(buttonTexts) {
+// innerText(), click(), waitFor() } }. `detach` controls Recovery V2's
+// bounded post-click transition wait: "immediate" resolves waitFor()
+// right away (simulates the clicked element leaving the DOM promptly),
+// "never" always rejects/times out (simulates it staying attached), and
+// omitting it entirely (undefined) simulates an older/minimal fake page
+// with no waitFor at all - must never throw just because it's absent.
+function makePageWithButtons(buttonTexts, { detach } = {}) {
   return {
     locator: (selector) => {
       assert.equal(selector, 'button, [role="button"], a');
@@ -13,9 +18,17 @@ function makePageWithButtons(buttonTexts) {
         count: async () => buttonTexts.length,
         nth: (i) => ({
           innerText: async () => buttonTexts[i],
-          click: async (opts) => {
+          click: async () => {
             makePageWithButtons.lastClicked = buttonTexts[i];
           },
+          ...(detach === undefined ? {} : {
+            waitFor: async ({ timeout } = {}) => {
+              if (detach === "immediate") return;
+              // "never" - simulate Playwright's own timeout rejection.
+              await new Promise((resolve) => setTimeout(resolve, Math.min(timeout || 0, 20)));
+              throw new Error(`Timeout ${timeout}ms exceeded while waiting for element to be detached`);
+            },
+          }),
         }),
       };
     },
@@ -104,6 +117,91 @@ test("attemptRecovery reports a click failure without throwing", async () => {
   const result = await attemptRecovery(page, "COOKIE_CONSENT_REQUIRED");
   assert.equal(result.performed, false);
   assert.match(result.detail, /click failed/);
+});
+
+// --- Recovery V2 (2026-08-27+): bounded post-click transition detection --
+
+test("performCookieConsent reports transitionObserved:false and a near-zero elapsed time when transitionWaitMs is not supplied (backward compatible with V1 callers)", async () => {
+  const page = makePageWithButtons(["Decline optional cookies"]); // no `detach` option = no waitFor at all on the fake
+  const result = await attemptRecovery(page, "COOKIE_CONSENT_REQUIRED");
+  assert.equal(result.performed, true);
+  assert.equal(result.transitionObserved, false);
+  assert.equal(typeof result.transitionElapsedMs, "number");
+});
+
+test("performCookieConsent reports transitionObserved:true quickly when the clicked element detaches within the budget", async () => {
+  const page = makePageWithButtons(["Decline optional cookies"], { detach: "immediate" });
+  const result = await attemptRecovery(page, "COOKIE_CONSENT_REQUIRED", { transitionWaitMs: 2000 });
+  assert.equal(result.performed, true);
+  assert.equal(result.transitionObserved, true);
+  assert.ok(result.transitionElapsedMs < 200, "an immediate detach must not wait anywhere near the full budget");
+});
+
+test("performCookieConsent reports transitionObserved:false (bounded, never throws) when the clicked element never detaches within the budget", async () => {
+  const page = makePageWithButtons(["Decline optional cookies"], { detach: "never" });
+  const result = await attemptRecovery(page, "COOKIE_CONSENT_REQUIRED", { transitionWaitMs: 20 });
+  assert.equal(result.performed, true);
+  assert.equal(result.transitionObserved, false);
+});
+
+test("performCookieConsent never waits for a transition when transitionWaitMs is 0 (explicit V1-equivalent behavior)", async () => {
+  const page = makePageWithButtons(["Decline optional cookies"], { detach: "never" });
+  const start = Date.now();
+  const result = await attemptRecovery(page, "COOKIE_CONSENT_REQUIRED", { transitionWaitMs: 0 });
+  assert.equal(result.performed, true);
+  assert.equal(result.transitionObserved, false);
+  assert.ok(Date.now() - start < 50, "transitionWaitMs:0 must add no real wait at all");
+});
+
+test("a click failure never reaches the transition-wait step (no waitFor call, no crash)", async () => {
+  const page = {
+    locator: () => ({
+      count: async () => 1,
+      nth: () => ({
+        innerText: async () => "Allow all cookies",
+        click: async () => { throw new Error("element detached"); },
+        waitFor: async () => { throw new Error("must never be called after a failed click"); },
+      }),
+    }),
+  };
+  const result = await attemptRecovery(page, "COOKIE_CONSENT_REQUIRED", { transitionWaitMs: 500 });
+  assert.equal(result.performed, false);
+  assert.equal(result.transitionObserved, undefined);
+});
+
+// --- Recovery V2 (2026-08-27+): diagnostic candidate capture on no-match --
+// Real incident (2026-08-27): bruna731302 hit "no recognized control" with
+// zero captured evidence of what was actually on the page, permanently
+// blocking any future fix. This never changes what is considered SAFE to
+// click - it only records what was observed, bounded and deduplicated.
+
+test("no recognized control found: the diagnostic detail includes a bounded, deduplicated sample of what WAS on the page", async () => {
+  const page = makePageWithButtons(["Continuer", "Continuer", "En savoir plus", "", "  "]);
+  const result = await attemptRecovery(page, "COOKIE_CONSENT_REQUIRED");
+  assert.equal(result.performed, false);
+  assert.match(result.detail, /no recognized/i);
+  assert.match(result.detail, /observed candidates/i);
+  assert.match(result.detail, /Continuer/);
+  assert.match(result.detail, /En savoir plus/);
+  // Deduplicated - "Continuer" appears twice on the page but must not be
+  // listed twice in the diagnostic sample.
+  const occurrences = (result.detail.match(/Continuer/g) || []).length;
+  assert.equal(occurrences, 1, "duplicate candidate text must be deduplicated");
+});
+
+test("no recognized control found on an empty page: no candidates section is added (nothing to report)", async () => {
+  const page = makePageWithButtons([]);
+  const result = await attemptRecovery(page, "COOKIE_CONSENT_REQUIRED");
+  assert.equal(result.performed, false);
+  assert.equal(/observed candidates/i.test(result.detail), false);
+});
+
+test("the diagnostic candidate sample is bounded (never grows unbounded with a large page)", async () => {
+  const manyButtons = Array.from({ length: 50 }, (_, i) => `Unrecognized Button ${i}`);
+  const page = makePageWithButtons(manyButtons);
+  const result = await attemptRecovery(page, "COOKIE_CONSENT_REQUIRED");
+  assert.equal(result.performed, false);
+  assert.ok(result.detail.length < 300, `diagnostic detail must stay bounded, got ${result.detail.length} chars`);
 });
 
 // --- Privacy/subscription choice policy hook ------------------------------

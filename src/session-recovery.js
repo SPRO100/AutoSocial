@@ -70,6 +70,20 @@ function resolveSettleDelayMsDefault() {
 
 const SETTLE_DELAY_MS_DEFAULT = resolveSettleDelayMsDefault();
 
+// Recovery V2 (2026-08-27+): when a recovery module reports it directly
+// OBSERVED the page transition it caused (see instagram-recovery.js's
+// transitionObserved, bounded by the SAME settleDelayMs budget passed to
+// it below), the fixed settle window has already effectively been spent -
+// only this small, fixed buffer is needed for any final re-render/redirect
+// to complete before re-verifying. A recovery module that never reports a
+// transition (TikTok, any future platform, or a click that never produced
+// an observable DOM change within budget) falls back to sleeping the FULL
+// settleDelayMs exactly as V1 - this can only make a CONFIRMED transition's
+// re-verify happen sooner, never anything slower or less safe than before.
+// Not env-overridable (unlike the two knobs above) - this is an internal
+// implementation constant, not a product-level tuning surface.
+const MIN_POST_TRANSITION_BUFFER_MS = 300;
+
 // Real production forensic finding (2026-08-26): a manually-driven session
 // showed Instagram's own server oscillating between a consent/cookie screen
 // and its scraping_warning anti-automation challenge - confirmed via
@@ -115,6 +129,12 @@ function recordAttempt({ account, platform, personaProfileId, attempt, classific
     action: action ? action.action : "verify_only",
     actionPerformed: action ? Boolean(action.performed) : false,
     actionDetail: action ? action.detail : null,
+    // Recovery V2 (2026-08-27+) - see instagram-recovery.js's
+    // performCookieConsent. null (not false/0) when the recovery module
+    // didn't report either field at all (e.g. TikTok, or no action was
+    // attempted this step) - distinct from "reported false/0".
+    transitionObserved: action && typeof action.transitionObserved === "boolean" ? action.transitionObserved : null,
+    transitionElapsedMs: action && typeof action.transitionElapsedMs === "number" ? action.transitionElapsedMs : null,
     result,
     reason: classification.reason || null,
     timestamp: nowIso(),
@@ -140,6 +160,14 @@ async function recoverSession({
   const seenSignatures = new Set();
   const seenFamilyStates = new Set();
   let attemptNumber = 0;
+  // Recovery V2 (2026-08-27+) - diagnostic only, never changes the STOP
+  // decision below (a repeated signature still always stops immediately,
+  // exactly as V1). Records whether the MOST RECENT performed action
+  // directly observed its own DOM transition, so a same-state repeat can
+  // be reported as "even after a confirmed page update" (strong loop
+  // evidence) vs "with no observed page change" (weaker - could equally be
+  // an unrecognized click target or a transition this module can't see).
+  let lastActionTransitionObserved = null;
 
   let classification;
   try {
@@ -171,12 +199,19 @@ async function recoverSession({
     const signature = `${classification.state}|${classification.url || ""}`;
     if (seenSignatures.has(signature)) {
       const finalState = sawDifferentFamilyMemberBefore ? "BLOCKED_CHALLENGE" : "REDIRECT_LOOP";
+      // Diagnostic-only distinction (Recovery V2, 2026-08-27+) - the STOP
+      // decision above is unchanged from V1; this only makes the persisted
+      // reason honestly reflect whether we had direct evidence the page
+      // actually changed before landing back on the same signature.
+      const progressDescriptor = lastActionTransitionObserved
+        ? "even after a confirmed page update was observed"
+        : "with no observed page change";
       const loopState = {
         ...classification,
         state: finalState,
         reason: finalState === "BLOCKED_CHALLENGE"
           ? `Instagram is oscillating between a consent/cookie screen and its anti-automation challenge (last: ${classification.state}) - this requires manual/account-level resolution, not an automated retry`
-          : `detected a repeated state/URL during recovery (last: ${classification.state}) - stopping to avoid an infinite loop`,
+          : `detected a repeated state/URL during recovery (last: ${classification.state}), ${progressDescriptor} - stopping to avoid an infinite loop`,
       };
       attempts.push(recordAttempt({ account, platform, personaProfileId, attempt: attemptNumber, classification: loopState, action: null, result: finalState, nextAction: terminalNextAction(finalState) }));
       return { ...loopState, active: false, attempts };
@@ -202,16 +237,24 @@ async function recoverSession({
 
     let action;
     try {
-      action = await recover.attemptRecovery(page, classification.state);
+      // Recovery V2 (2026-08-27+): pass the SAME settle budget as the
+      // bound for the recovery module's own optional transition wait (see
+      // instagram-recovery.js#performCookieConsent) - a single, coherent
+      // time budget per attempt, not two independently-tunable knobs. A
+      // recovery module that doesn't use it (there is currently only one
+      // that does) simply ignores the option.
+      action = await recover.attemptRecovery(page, classification.state, { transitionWaitMs: settleDelayMs });
     } catch (error) {
       action = { performed: false, action: "recovery_error", detail: safeMessage(error) };
     }
 
     if (!action.performed) {
+      lastActionTransitionObserved = null;
       attempts.push(recordAttempt({ account, platform, personaProfileId, attempt: attemptNumber, classification, action, result: "RECOVERY_EXHAUSTED", nextAction: "operator review required" }));
       return { ...classification, active: false, state: "RECOVERY_EXHAUSTED", reason: `no safe recovery action available for ${classification.state} (${action.detail})`, attempts };
     }
 
+    lastActionTransitionObserved = typeof action.transitionObserved === "boolean" ? action.transitionObserved : null;
     attempts.push(recordAttempt({ account, platform, personaProfileId, attempt: attemptNumber, classification, action, result: "RECOVERY_RETRYABLE", nextAction: "re-verify after recovery action" }));
 
     // Real production forensic finding (2026-08-26): give Instagram's
@@ -219,7 +262,21 @@ async function recoverSession({
     // reading the resulting state - a click's promise resolving is not
     // evidence the transition is complete. Never a retry, never extra
     // navigation - only WHEN the next read happens changes. 0 in tests.
-    if (settleDelayMs > 0) await sleep(settleDelayMs);
+    //
+    // Recovery V2 (2026-08-27+): if the recovery module already OBSERVED
+    // its own transition (bounded by this same settleDelayMs budget, spent
+    // inside attemptRecovery() above), the full fixed window has
+    // effectively already elapsed - only this small fixed buffer is needed
+    // for any final re-render/redirect to finish. Otherwise, fall back to
+    // sleeping the FULL settleDelayMs exactly as V1. settleDelayMs===0
+    // (tests) always means zero wait, regardless of transitionObserved -
+    // preserves the existing "explicit settleDelayMs:0 disables the delay"
+    // contract exactly.
+    let waitMs = settleDelayMs;
+    if (settleDelayMs > 0 && lastActionTransitionObserved) {
+      waitMs = MIN_POST_TRANSITION_BUFFER_MS;
+    }
+    if (waitMs > 0) await sleep(waitMs);
 
     attemptNumber += 1;
     try {

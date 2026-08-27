@@ -270,6 +270,41 @@ for (const state of ["ACCOUNT_SUSPENDED", "UNKNOWN"]) {
   });
 }
 
+// Recovery V2 (2026-08-27+) diagnostic fields - same silent-drop risk as
+// above if the allowlist in normalizeRecoveryAttempt isn't kept in sync.
+test("setSessionStatus persists Recovery V2's transitionObserved/transitionElapsedMs attempt fields across a reload from disk", async () => {
+  const { accountManager } = await freshAccountManager();
+  const account = await accountManager.addAccount("ig-account-v2");
+  await accountManager.setSessionStatus(account.id, {
+    status: "ready",
+    reason: null,
+    checkedAt: new Date().toISOString(),
+    state: "READY",
+    attempts: [
+      {
+        attempt: 1,
+        state: "COOKIE_CONSENT_REQUIRED",
+        url: "https://ig/consent/?flow=user_cookie_choice_v2",
+        action: "cookie_consent",
+        actionPerformed: true,
+        actionDetail: "clicked control matching \"Decline optional cookies\"",
+        transitionObserved: true,
+        transitionElapsedMs: 42,
+        result: "RECOVERY_RETRYABLE",
+        reason: "Instagram is showing a routine cookie-consent banner",
+        timestamp: new Date().toISOString(),
+        nextAction: "re-verify after recovery action",
+      },
+    ],
+  });
+
+  delete require.cache[require.resolve("../src/account-manager")];
+  const reloaded = require("../src/account-manager");
+  const persisted = await reloaded.getAccountById(account.id);
+  assert.equal(persisted.sessionRecoveryAttempts[0].transitionObserved, true);
+  assert.equal(persisted.sessionRecoveryAttempts[0].transitionElapsedMs, 42);
+});
+
 test("many concurrent addAccount calls (as the bulk importer's worker pool issues) never lose an update on disk - final file matches final in-memory state", async () => {
   const { accountManager, stateFile } = await freshAccountManager();
 
