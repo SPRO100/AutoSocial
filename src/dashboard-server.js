@@ -47,6 +47,7 @@ const {
   listPersonaProfiles,
 } = require("./persona-browser");
 const { computeAccountPersona, indexProfilesById } = require("./persona-overview");
+const supplierLab = require("./supplier-lab");
 const { detectFormat } = require("./importers/detector");
 const manualMapping = require("./importers/manual-mapping");
 const templateStore = require("./importers/template-store");
@@ -633,6 +634,7 @@ async function createServer() {
           supplierBatchId: account.supplierBatchId || null,
           sessionSource: account.sessionSource || null,
           sessionIntegrity: account.sessionIntegrity || null,
+          networkIdentity: account.networkIdentity || null,
           firstVerifiedAt: account.firstVerifiedAt || null,
           firstSessionStatus: account.firstSessionStatus || null,
           lastReadyAt: account.lastReadyAt || null,
@@ -673,6 +675,7 @@ async function createServer() {
         supplierBatchId: account.supplierBatchId || null,
         sessionSource: account.sessionSource || null,
         sessionIntegrity: account.sessionIntegrity || null,
+        networkIdentity: account.networkIdentity || null,
         firstVerifiedAt: account.firstVerifiedAt || null,
         firstSessionStatus: account.firstSessionStatus || null,
         lastReadyAt: account.lastReadyAt || null,
@@ -688,6 +691,26 @@ async function createServer() {
       })),
       quality: qualitySummary(accounts),
     });
+  });
+
+  // Secret-free, append-only Supplier Lab projections. Posting an observation
+  // never starts a browser or performs recovery; a scheduler may submit the
+  // same checkpoint repeatedly and receive the existing observation.
+  app.get("/api/supplier-lab/experiments", async (_req, res) => {
+    res.json({ ok: true, experiments: await supplierLab.listExperiments() });
+  });
+  app.post("/api/supplier-lab/experiments", async (req, res) => {
+    try { res.status(201).json({ ok: true, experiment: await supplierLab.createExperiment(req.body || {}) }); }
+    catch (error) { res.status(400).json({ ok: false, error: error.message }); }
+  });
+  app.get("/api/supplier-lab/experiments/:id", async (req, res) => {
+    const experiment = await supplierLab.getExperiment(req.params.id);
+    if (!experiment) return res.status(404).json({ ok: false, error: "Supplier experiment not found." });
+    res.json({ ok: true, experiment, scorecard: supplierLab.scorecard(experiment) });
+  });
+  app.post("/api/supplier-lab/experiments/:id/observations", async (req, res) => {
+    try { res.status(201).json({ ok: true, observation: await supplierLab.recordObservation(req.params.id, req.body || {}) }); }
+    catch (error) { res.status(400).json({ ok: false, error: error.message }); }
   });
 
   // Bulk account import (see src/importers/). Two steps: preview (parse +

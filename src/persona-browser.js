@@ -283,10 +283,15 @@ async function stopPersonaProfile(profileId) {
  * route relies on the same dash.save() behavior) - callers must never
  * invent their own id.
  */
-async function createPersonaProfile({ name, tags } = {}) {
+async function createPersonaProfile({ name, tags, proxy, userAgent } = {}) {
   const body = {};
   if (name) body.name = name;
   if (Array.isArray(tags)) body.tags = tags;
+  // Persona's canonical profile contract accepts proxy configuration and
+  // keeps the credential-bearing fields inside Persona.  Pass it through
+  // only when the importer supplied one; never include it in the safe return.
+  if (proxy && typeof proxy === "object") body.proxy = proxy;
+  if (userAgent) body.userAgent = userAgent;
   const created = await personaRequest("/api/profiles", {
     method: "POST",
     body: JSON.stringify(body),

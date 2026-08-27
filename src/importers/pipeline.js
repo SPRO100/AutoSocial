@@ -22,6 +22,7 @@ const { toPersonaCookiePayload } = require("./cookie-adapter");
 const { analyzeCookieSet } = require("../account-health");
 const credentialVault = require("../security/credential-vault");
 const { recoverSession, mapToPipelineStatus, mapToSessionStatus } = require("../session-recovery");
+const { summarizeProxy } = require("../network-identity");
 
 const DEFAULT_CONCURRENCY = 2;
 // A hard ceiling regardless of what a caller requests - importBatch is
@@ -336,6 +337,7 @@ async function processRecord(record, updateSessionKeys, importMeta = {}) {
       supplierBatchId: importMeta.batchId || null,
       sessionSource: record.cookies ? "supplier_cookie_bundle" : "credentials_only",
       sessionIntegrity: record.cookies ? analyzeCookieSet(record.cookies, record.platform) : null,
+      networkIdentity: summarizeProxy(record.proxy),
     });
     accountId = account.id;
   } catch (error) {
@@ -356,6 +358,8 @@ async function processRecord(record, updateSessionKeys, importMeta = {}) {
     const profile = await persona.createPersonaProfile({
       name: profileName,
       tags: ["autosocial-import", record.platform],
+      proxy: record.proxy,
+      userAgent: record.userAgent,
     });
     profileId = profile.id;
   } catch (error) {

@@ -158,6 +158,17 @@ function normalizeCookieIntegrity(value) {
   return Object.keys(out).length ? out : null;
 }
 
+function normalizeNetworkIdentity(value) {
+  if (!value || typeof value !== "object") return null;
+  const out = {};
+  if (typeof value.proxyConfigured === "boolean") out.proxyConfigured = value.proxyConfigured;
+  for (const key of ["proxyType", "proxyHostFingerprint", "proxyCountry", "expectedCountry", "proxyProvider", "networkContinuityState"]) {
+    if (typeof value[key] === "string" && value[key].length <= 120) out[key] = value[key];
+  }
+  if (Number.isFinite(value.proxyPort)) out.proxyPort = Math.floor(value.proxyPort);
+  return Object.keys(out).length ? out : null;
+}
+
 function normalizeAccount(item) {
   const account = { id: item.id, name: item.name };
   const personaProfileId = normalizePersonaProfileId(item.personaProfileId);
@@ -180,6 +191,8 @@ function normalizeAccount(item) {
   if (sessionSource) account.sessionSource = sessionSource;
   const sessionIntegrity = normalizeCookieIntegrity(item.sessionIntegrity || item.cookieIntegrity);
   if (sessionIntegrity) account.sessionIntegrity = sessionIntegrity;
+  const networkIdentity = normalizeNetworkIdentity(item.networkIdentity);
+  if (networkIdentity) account.networkIdentity = networkIdentity;
 
   // Safe, non-secret operational status - last known verified social
   // session health and last publish outcome. Set by session-check.js
@@ -363,6 +376,8 @@ async function addAccount(name, extra = {}) {
   }
   const sessionIntegrity = normalizeCookieIntegrity(extra.sessionIntegrity || extra.cookieIntegrity);
   if (sessionIntegrity) account.sessionIntegrity = sessionIntegrity;
+  const networkIdentity = normalizeNetworkIdentity(extra.networkIdentity);
+  if (networkIdentity) account.networkIdentity = networkIdentity;
   state.accounts.push(account);
   state.activeAccountId = account.id;
   await saveState();
