@@ -14,6 +14,9 @@ node_modules/
 .scheduler-state/
 *-state.json
 
+# Encrypted-at-rest importer credential vault (src/security/credential-vault.js)
+credential-vault.json
+
 # Queue and render outputs
 queue/*/*/posted/
 queue/*/*/failed/

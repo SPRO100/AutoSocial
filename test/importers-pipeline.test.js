@@ -34,6 +34,12 @@ const LOGIN_URL = "https://www.tiktok.com/login?redirect_url=%2Ftiktokstudio%2Fu
 async function freshPipeline({ persona = {}, sessionUrl = ACTIVE_URL } = {}) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "autosocial-import-pipeline-"));
   process.env.ACCOUNTS_STATE_FILE = path.join(dir, "accounts-state.json");
+  // Isolates credential-vault.js's writes to this test run's own temp dir -
+  // without this, a real AUTOSOCIAL_CREDENTIALS_KEY configured via .env
+  // (see .env.example) would make every processRecord() call in this file
+  // write real (synthetic-password) entries into the actual production
+  // credential-vault.json at the repo root on every test run.
+  process.env.CREDENTIAL_VAULT_FILE = path.join(dir, "credential-vault.json");
   delete require.cache[require.resolve("../src/account-manager")];
   const accountManager = require("../src/account-manager");
 

@@ -75,6 +75,12 @@ test("REGRESSION: the real HTTP route (not just the in-process function) correct
     env: {
       ...process.env,
       ACCOUNTS_STATE_FILE: stateFile,
+      // Isolates credential-vault.js's writes to this test's own temp dir -
+      // this spawned server runs with cwd=/opt/autosocial, so without this
+      // it would pick up a real AUTOSOCIAL_CREDENTIALS_KEY from .env (see
+      // .env.example) and write this test's synthetic FakePass1 into the
+      // actual production credential-vault.json.
+      CREDENTIAL_VAULT_FILE: path.join(dir, "credential-vault.json"),
       DASHBOARD_PORT: String(TEST_PORT),
       DASHBOARD_HOST: "127.0.0.1",
       HEADLESS: "true",

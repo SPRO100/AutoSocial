@@ -43,6 +43,9 @@ test("REGRESSION: Update Session's cookie refresh survives Persona's write proce
 
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "autosocial-update-session-persistence-"));
   process.env.ACCOUNTS_STATE_FILE = path.join(dir, "accounts-state.json");
+  // Isolates credential-vault.js's writes to this test's own temp dir - see
+  // the matching comment in importers-pipeline.test.js.
+  process.env.CREDENTIAL_VAULT_FILE = path.join(dir, "credential-vault.json");
   delete require.cache[require.resolve("../src/account-manager")];
   const accountManager = require("../src/account-manager");
   delete require.cache[require.resolve("../src/importers/pipeline")];
