@@ -321,6 +321,35 @@ async function waitForPostConfirmation(page, startedUrl) {
   return { ok: false, reason: "No reliable Instagram post confirmation within timeout." };
 }
 
+// Best-effort, read-only, bounded permalink capture (2026-08-27, first
+// real E2E publish milestone) - never turns an already-confirmed publish
+// (waitForPostConfirmation already returned positive evidence before this
+// is ever called) into a failure if it can't find one. Only ever
+// navigates to the account's OWN profile page - no other page, no click,
+// no interaction with anything else. content-os's publishing-router
+// already has full plumbing for remotePostId/remotePostUrl (see
+// integrations/autosocial.ts#PublishBrowserResult) - this is the one
+// place that was never populating it.
+async function capturePermalink(page, username) {
+  if (!username) return { remotePostId: null, remotePostUrl: null };
+  try {
+    await navigateWithRetry(page, `https://www.instagram.com/${encodeURIComponent(username)}/`, { maxRetries: 1 });
+    const link = page.locator('a[href^="/p/"], a[href^="/reel/"]').first();
+    await link.waitFor({ state: "attached", timeout: 15000 });
+    const href = await link.getAttribute("href");
+    if (!href) return { remotePostId: null, remotePostUrl: null };
+    const match = href.match(/\/(?:p|reel)\/([^/?#]+)/);
+    return {
+      remotePostId: match ? match[1] : null,
+      remotePostUrl: `https://www.instagram.com${href}`,
+    };
+  } catch {
+    // Diagnostic-only - the publish itself already succeeded on the
+    // stronger evidence waitForPostConfirmation already required.
+    return { remotePostId: null, remotePostUrl: null };
+  }
+}
+
 async function uploadMedia({ mediaPaths, caption, accountId, publicationType = "video" }) {
   const absoluteMediaPaths = (Array.isArray(mediaPaths) ? mediaPaths : [mediaPaths]).map((file) => path.resolve(file));
   let session = null;
@@ -387,9 +416,14 @@ async function uploadMedia({ mediaPaths, caption, accountId, publicationType = "
     );
     await page.screenshot({ path: successScreenshotPath, fullPage: true }).catch(() => { });
 
+    // Short settle wait before looking - gives Instagram's own grid a
+    // realistic chance to reflect the just-created post first.
+    await page.waitForTimeout(3000);
+    const { remotePostId, remotePostUrl } = await capturePermalink(page, account ? account.name : null);
+
     // Hold the browser open so background processing finishes
     closeHoldMs = Math.max(config.postPublishHoldMs || 15000, 15000);
-    return { ok: true, publicationType, ...telemetry };
+    return { ok: true, publicationType, remotePostId, remotePostUrl, ...telemetry };
   } catch (error) {
     const screenshotPath = path.resolve(
       config.projectRoot,
@@ -423,4 +457,5 @@ module.exports = {
   startLoginSession,
   getLoginSessionStatus,
   closeLoginSession,
+  capturePermalink,
 };
