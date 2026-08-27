@@ -26,13 +26,14 @@ test("health projection is fail-closed and marks stale READY degraded", () => {
 
 test("quality summary reports evidence limits for legacy pool", () => {
   const result = qualitySummary([
-    { importPlatform: "instagram", sessionStatus: "ready", sessionCheckedAt: new Date().toISOString() },
-    { importPlatform: "instagram", sessionStatus: "needs_login" },
-    { importPlatform: "instagram", sessionStatus: "challenge_required", sessionState: "ACCOUNT_SUSPENDED" },
+    { importPlatform: "instagram", sessionStatus: "ready", firstVerifiedAt: new Date().toISOString(), firstSessionStatus: "ready", sessionCheckedAt: new Date().toISOString() },
+    { importPlatform: "instagram", sessionStatus: "needs_login", firstVerifiedAt: new Date().toISOString(), firstSessionStatus: "needs_login" },
+    { importPlatform: "instagram", sessionStatus: "challenge_required", sessionState: "ACCOUNT_SUSPENDED", firstVerifiedAt: new Date().toISOString(), firstSessionStatus: "challenge_required" },
     { importPlatform: "tiktok", sessionStatus: "ready", sessionCheckedAt: new Date().toISOString() },
   ]);
   assert.equal(result.total, 4);
-  assert.equal(result.firstPassReady, 2);
+  assert.equal(result.firstPassReady, 1);
+  assert.equal(result.firstPassMeasured, 3);
   assert.equal(result.loginRequired, 1);
   assert.equal(result.challengedOrSuspended, 1);
   assert.match(result.note, /legacy imports/);

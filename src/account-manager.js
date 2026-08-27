@@ -202,6 +202,8 @@ function normalizeAccount(item) {
   if (sessionRecoveryAttempts) account.sessionRecoveryAttempts = sessionRecoveryAttempts;
   const firstVerifiedAt = normalizeIsoTimestamp(item.firstVerifiedAt);
   if (firstVerifiedAt) account.firstVerifiedAt = firstVerifiedAt;
+  const firstSessionStatus = normalizeEnum(item.firstSessionStatus, SESSION_STATUS_VALUES);
+  if (firstSessionStatus) account.firstSessionStatus = firstSessionStatus;
   const lastReadyAt = normalizeIsoTimestamp(item.lastReadyAt);
   if (lastReadyAt) account.lastReadyAt = lastReadyAt;
   const healthState = normalizeSafeText(item.healthState, 40);
@@ -525,7 +527,10 @@ async function setSessionStatus(accountId, { status, reason, checkedAt, state: s
   const normalizedAttempts = normalizeRecoveryAttempts(attempts);
   if (normalizedAttempts) target.sessionRecoveryAttempts = normalizedAttempts;
   const checked = target.sessionCheckedAt;
-  if (!target.firstVerifiedAt) target.firstVerifiedAt = checked;
+  if (!target.firstVerifiedAt) {
+    target.firstVerifiedAt = checked;
+    target.firstSessionStatus = status;
+  }
   if (status === "ready") {
     target.lastReadyAt = checked;
     target.healthState = "READY";

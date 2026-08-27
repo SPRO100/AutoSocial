@@ -93,16 +93,19 @@ function qualitySummary(accounts) {
   const rows = accounts.filter((account) => account.importPlatform);
   const count = (predicate) => rows.filter(predicate).length;
   const rate = (n) => rows.length ? Number((n / rows.length).toFixed(4)) : null;
-  const ready = count((a) => a.sessionStatus === "ready" && !healthForAccount(a).stale);
+  const measured = rows.filter((a) => a.firstVerifiedAt && a.firstSessionStatus);
+  const ready = measured.filter((a) => a.firstSessionStatus === "ready").length;
   return {
     total: rows.length,
+    firstPassMeasured: measured.length,
     firstPassReady: ready,
-    firstPassReadyRate: rate(ready),
+    firstPassReadyRate: measured.length ? Number((ready / measured.length).toFixed(4)) : null,
+    firstPassMeasurementComplete: measured.length === rows.length,
     loginRequired: count((a) => a.sessionStatus === "needs_login"),
     unknown: count((a) => a.sessionStatus === "unknown" || a.sessionStatus === "error"),
     challengedOrSuspended: count((a) => a.sessionStatus === "challenge_required"),
     staleReady: count((a) => healthForAccount(a).stale),
-    note: "Supplier identity/batch metadata was not captured for legacy imports; rates are pool-level, not supplier-level.",
+    note: measured.length ? "First-pass metrics cover accounts with import-time verification evidence; supplier attribution is unavailable for legacy imports." : "No import-time first-pass evidence exists for legacy imports; collect a new measured batch before evaluating supplier quality.",
   };
 }
 
