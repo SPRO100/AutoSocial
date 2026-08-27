@@ -39,8 +39,20 @@ const {
   getPersonaProfileId,
   hasSavedPlatformSession,
   setPublishStatus,
+  getAccountById,
+  setCapabilities,
+  setPool,
+  setProfileLinkIntent,
+  setProfileLinkResult,
+  effectivePool,
   PLATFORMS,
 } = require("./account-manager");
+const { acquireBrowserSession } = require("./browser-session");
+const {
+  probeInstagramCapabilities,
+  probeTikTokCapabilities,
+  applyInstagramProfileLink,
+} = require("./account-capability");
 const {
   stopPersonaProfile,
   startPersonaBrowser,
@@ -691,6 +703,168 @@ async function createServer() {
       })),
       quality: qualitySummary(accounts),
     });
+  });
+
+  // --- Account Operations & Link Control V1 ------------------------------
+  //
+  // Canonical, secret-free capability/pool/profile-link surface - the same
+  // AutoSocial-observable facts a content-os Qualification Engine, the
+  // Dashboard, and an orchestrator all read (no UI-scraping route). See
+  // account-capability.js for the actual probe logic and account-manager.js
+  // for persistence/allowlisting.
+
+  app.get("/api/account/:id/capabilities", async (req, res) => {
+    const account = await getAccountById(req.params.id);
+    if (!account) return res.status(404).json({ ok: false, error: "Account not found." });
+    res.json({
+      ok: true,
+      accountId: account.id,
+      platform: account.importPlatform || null,
+      pool: effectivePool(account),
+      sessionStatus: account.sessionStatus || "unknown",
+      identityStatus: account.identityStatus || "UNKNOWN",
+      privacyStatus: account.privacyStatus || "UNKNOWN",
+      profileEditCapability: account.profileEditCapability || "UNKNOWN",
+      linkCapability: account.linkCapability || "UNKNOWN",
+      publishingCapability: account.publishingCapability || "UNKNOWN",
+      observedProfileLink: account.observedProfileLink || null,
+      desiredProfileLink: account.desiredProfileLink || null,
+      profileLinkStatus: account.profileLinkStatus || "UNKNOWN",
+      capabilityCheckedAt: account.capabilityCheckedAt || null,
+      capabilityEvidence: account.capabilityEvidence || null,
+      lastLinkAppliedAt: account.lastLinkAppliedAt || null,
+      lastLinkVerifiedAt: account.lastLinkVerifiedAt || null,
+      linkFailureReason: account.linkFailureReason || null,
+    });
+  });
+
+  // Bulk projection for the Qualification Engine / orchestrator / real
+  // pool-wide qualification runs - one fetch instead of N.
+  app.get("/api/accounts/capabilities", async (req, res) => {
+    const accounts = await getAllAccounts();
+    res.json({
+      ok: true,
+      accounts: accounts.filter((account) => account.importPlatform).map((account) => ({
+        id: account.id,
+        platform: account.importPlatform,
+        pool: effectivePool(account),
+        sessionStatus: account.sessionStatus || "unknown",
+        identityStatus: account.identityStatus || "UNKNOWN",
+        privacyStatus: account.privacyStatus || "UNKNOWN",
+        profileEditCapability: account.profileEditCapability || "UNKNOWN",
+        linkCapability: account.linkCapability || "UNKNOWN",
+        publishingCapability: account.publishingCapability || "UNKNOWN",
+        observedProfileLink: account.observedProfileLink || null,
+        desiredProfileLink: account.desiredProfileLink || null,
+        profileLinkStatus: account.profileLinkStatus || "UNKNOWN",
+        capabilityCheckedAt: account.capabilityCheckedAt || null,
+        supplierFormat: account.supplierFormat || null,
+        supplierBatchId: account.supplierBatchId || null,
+      })),
+    });
+  });
+
+  // Bounded, read-only probe - never opens a browser for a non-READY
+  // session (that would only ever observe UNKNOWN; the session state is
+  // already known without paying for a browser launch).
+  app.post("/api/account/:id/qualify-capabilities", async (req, res) => {
+    const accountId = req.params.id;
+    try {
+      const account = await getAccountById(accountId);
+      if (!account) return res.status(404).json({ ok: false, error: "Account not found." });
+      if (account.sessionStatus !== "ready") {
+        return res.status(409).json({ ok: false, code: "SESSION_NOT_READY", error: "Account session is not READY; run session check/recovery first." });
+      }
+      if (!accountLock.tryLock(accountId)) {
+        return res.status(409).json({ ok: false, code: "ACCOUNT_BUSY", error: "Account is currently busy with another operation." });
+      }
+      let session;
+      try {
+        session = await acquireBrowserSession(account.importPlatform, { accountId });
+        const result = account.importPlatform === "instagram"
+          ? await probeInstagramCapabilities(session.page, account.importUsername)
+          : account.importPlatform === "tiktok"
+            ? await probeTikTokCapabilities(session.page, account.importUsername)
+            : null;
+        if (!result) {
+          return res.status(501).json({ ok: false, code: "UNSUPPORTED_PLATFORM", error: `Capability probing is not implemented for ${account.importPlatform}.` });
+        }
+        const updated = await setCapabilities(accountId, result);
+        res.json({ ok: true, accountId, platform: account.importPlatform, ...result, checkedAt: updated.capabilityCheckedAt });
+      } finally {
+        if (session) await session.disconnect().catch(() => {});
+        accountLock.unlock(accountId);
+      }
+    } catch (error) {
+      res.status(500).json({ ok: false, error: error.message });
+    }
+  });
+
+  // Link Control mutation - INTENT -> PREFLIGHT -> MUTATE ONCE -> VERIFY ->
+  // PERSIST. Never retried automatically on an ambiguous (ERROR) outcome;
+  // see applyInstagramProfileLink's own contract in account-capability.js.
+  app.post("/api/account/:id/profile-link", async (req, res) => {
+    const accountId = req.params.id;
+    const desiredUrl = typeof req.body?.desiredUrl === "string" ? req.body.desiredUrl.trim() : "";
+    if (!desiredUrl) return res.status(400).json({ ok: false, error: "Missing desiredUrl." });
+    try {
+      const account = await getAccountById(accountId);
+      if (!account) return res.status(404).json({ ok: false, error: "Account not found." });
+      if (account.importPlatform !== "instagram") {
+        return res.status(501).json({ ok: false, code: "UNSUPPORTED_PLATFORM", error: "Profile-link apply is currently implemented for Instagram only." });
+      }
+      if (account.sessionStatus !== "ready") {
+        return res.status(409).json({ ok: false, code: "SESSION_NOT_READY", error: "Account session is not READY." });
+      }
+      if (!accountLock.tryLock(accountId)) {
+        return res.status(409).json({ ok: false, code: "ACCOUNT_BUSY", error: "Account is currently busy with another operation." });
+      }
+      await setProfileLinkIntent(accountId, desiredUrl);
+      let session;
+      try {
+        session = await acquireBrowserSession(account.importPlatform, { accountId });
+        const outcome = await applyInstagramProfileLink(session.page, desiredUrl);
+        const now = new Date().toISOString();
+        const updated = await setProfileLinkResult(accountId, {
+          status: outcome.status,
+          observedUrl: outcome.observedUrl,
+          appliedAt: now,
+          verifiedAt: now,
+          failureReason: outcome.failureReason,
+        });
+        res.json({
+          ok: outcome.status === "ACTIVE",
+          status: outcome.status,
+          desiredUrl,
+          observedUrl: updated.observedProfileLink || null,
+          failureReason: updated.linkFailureReason || null,
+          appliedAt: updated.lastLinkAppliedAt,
+          verifiedAt: updated.lastLinkVerifiedAt,
+          // Only MISSING/MISMATCH are positively-confirmed states safe to
+          // attempt again; ERROR/UNAVAILABLE must be reconciled first.
+          safeToRetry: outcome.status === "MISSING" || outcome.status === "MISMATCH",
+        });
+      } finally {
+        if (session) await session.disconnect().catch(() => {});
+        accountLock.unlock(accountId);
+      }
+    } catch (error) {
+      res.status(500).json({ ok: false, error: error.message });
+    }
+  });
+
+  // Logical pool organization only - never deletes/mutates the platform
+  // account itself. See account-manager.js#setPool's own doc comment.
+  app.post("/api/account/:id/pool", async (req, res) => {
+    const accountId = req.params.id;
+    const pool = typeof req.body?.pool === "string" ? req.body.pool.toUpperCase() : "";
+    const reason = typeof req.body?.reason === "string" ? req.body.reason : undefined;
+    try {
+      const updated = await setPool(accountId, { pool, reason });
+      res.json({ ok: true, accountId, pool: updated.pool, poolReason: updated.poolReason || null, poolUpdatedAt: updated.poolUpdatedAt || null });
+    } catch (error) {
+      res.status(400).json({ ok: false, error: error.message });
+    }
   });
 
   // Secret-free, append-only Supplier Lab projections. Posting an observation

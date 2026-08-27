@@ -43,6 +43,20 @@ function normalizeSourceField(value) {
 
 const SESSION_STATUS_VALUES = new Set(["ready", "needs_login", "challenge_required", "unknown", "error"]);
 const PUBLISH_STATUS_VALUES = new Set(["published", "failed", "unconfirmed"]);
+
+// Account Operations & Link Control V1 - canonical capability/operational
+// vocabulary. Additive to SESSION_STATUS_VALUES/SESSION_STATE_VALUES above,
+// never a replacement: a READY session is an authentication fact, these are
+// separate business/platform-capability facts observed on top of it (see
+// this module's header comment on why SESSION STATE != OPERATIONAL STATUS).
+const IDENTITY_STATUS_VALUES = new Set(["CONFIRMED", "MISMATCH", "UNKNOWN"]);
+const PRIVACY_STATUS_VALUES = new Set(["PUBLIC", "PRIVATE", "UNKNOWN", "NOT_APPLICABLE"]);
+const CAPABILITY_VALUES = new Set(["AVAILABLE", "UNAVAILABLE", "UNKNOWN"]);
+const POOL_VALUES = new Set(["ACTIVE", "QUARANTINE", "ARCHIVED"]);
+const PROFILE_LINK_STATUS_VALUES = new Set([
+  "UNKNOWN", "UNAVAILABLE", "NOT_SET", "APPLYING", "ACTIVE", "MISSING", "MISMATCH", "BROKEN", "ERROR",
+]);
+const MAX_CAPABILITY_EVIDENCE_ITEMS = 20;
 // Granular Session Recovery Pipeline state - see
 // importers/instagram-verify.js's STATES (the authoritative definition;
 // this is a mirrored validation allowlist, same pattern as the two enums
@@ -158,6 +172,26 @@ function normalizeCookieIntegrity(value) {
   return Object.keys(out).length ? out : null;
 }
 
+// Secret-free, bounded diagnostic breadcrumbs a capability probe leaves
+// behind (e.g. "website_field_found", "redirected:/accounts/login") - never
+// a raw URL/cookie/token. Callers are responsible for pre-sanitizing each
+// string (see account-capability.js's safeMessage/safePathOnly), same
+// division of responsibility as normalizeSafeText's contract above.
+function normalizeCapabilityEvidence(value) {
+  if (!Array.isArray(value)) return null;
+  const normalized = value
+    .filter((item) => typeof item === "string" && item.trim())
+    .map((item) => item.trim().slice(0, 160))
+    .slice(0, MAX_CAPABILITY_EVIDENCE_ITEMS);
+  return normalized.length ? normalized : null;
+}
+
+function normalizeUrlField(value, maxLen = 500) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed ? trimmed.slice(0, maxLen) : null;
+}
+
 function normalizeNetworkIdentity(value) {
   if (!value || typeof value !== "object") return null;
   const out = {};
@@ -235,6 +269,44 @@ function normalizeAccount(item) {
   if (lastPublishAt) account.lastPublishAt = lastPublishAt;
   const lastPublishError = normalizeSafeText(item.lastPublishError);
   if (lastPublishError) account.lastPublishError = lastPublishError;
+
+  // Account Operations & Link Control V1 - see account-capability.js. Absent
+  // means "never probed"/"ACTIVE" (the caller-facing default), never
+  // fabricated here.
+  const pool = normalizeEnum(item.pool, POOL_VALUES);
+  if (pool) account.pool = pool;
+  const poolReason = normalizeSafeText(item.poolReason);
+  if (poolReason) account.poolReason = poolReason;
+  const poolUpdatedAt = normalizeIsoTimestamp(item.poolUpdatedAt);
+  if (poolUpdatedAt) account.poolUpdatedAt = poolUpdatedAt;
+
+  const identityStatus = normalizeEnum(item.identityStatus, IDENTITY_STATUS_VALUES);
+  if (identityStatus) account.identityStatus = identityStatus;
+  const privacyStatus = normalizeEnum(item.privacyStatus, PRIVACY_STATUS_VALUES);
+  if (privacyStatus) account.privacyStatus = privacyStatus;
+  const profileEditCapability = normalizeEnum(item.profileEditCapability, CAPABILITY_VALUES);
+  if (profileEditCapability) account.profileEditCapability = profileEditCapability;
+  const linkCapability = normalizeEnum(item.linkCapability, CAPABILITY_VALUES);
+  if (linkCapability) account.linkCapability = linkCapability;
+  const publishingCapability = normalizeEnum(item.publishingCapability, CAPABILITY_VALUES);
+  if (publishingCapability) account.publishingCapability = publishingCapability;
+  const capabilityCheckedAt = normalizeIsoTimestamp(item.capabilityCheckedAt);
+  if (capabilityCheckedAt) account.capabilityCheckedAt = capabilityCheckedAt;
+  const capabilityEvidence = normalizeCapabilityEvidence(item.capabilityEvidence);
+  if (capabilityEvidence) account.capabilityEvidence = capabilityEvidence;
+
+  const desiredProfileLink = normalizeUrlField(item.desiredProfileLink);
+  if (desiredProfileLink) account.desiredProfileLink = desiredProfileLink;
+  const observedProfileLink = normalizeUrlField(item.observedProfileLink);
+  if (observedProfileLink) account.observedProfileLink = observedProfileLink;
+  const profileLinkStatus = normalizeEnum(item.profileLinkStatus, PROFILE_LINK_STATUS_VALUES);
+  if (profileLinkStatus) account.profileLinkStatus = profileLinkStatus;
+  const lastLinkAppliedAt = normalizeIsoTimestamp(item.lastLinkAppliedAt);
+  if (lastLinkAppliedAt) account.lastLinkAppliedAt = lastLinkAppliedAt;
+  const lastLinkVerifiedAt = normalizeIsoTimestamp(item.lastLinkVerifiedAt);
+  if (lastLinkVerifiedAt) account.lastLinkVerifiedAt = lastLinkVerifiedAt;
+  const linkFailureReason = normalizeSafeText(item.linkFailureReason);
+  if (linkFailureReason) account.linkFailureReason = linkFailureReason;
 
   return account;
 }
@@ -589,6 +661,105 @@ async function setPublishStatus(accountId, { status, reason, at } = {}) {
   return clone(target);
 }
 
+// --- Account Operations & Link Control V1 ------------------------------
+//
+// Capability/pool/profile-link state observed by account-capability.js's
+// bounded, read-only (capabilities) or INTENT->PREFLIGHT->MUTATE ONCE->
+// VERIFY->PERSIST (profile-link) probes. Never a cookie/password/token -
+// same contract as every setter above.
+
+async function setCapabilities(accountId, {
+  identityStatus, privacyStatus, profileEditCapability, linkCapability, publishingCapability,
+  observedProfileLink, evidence, checkedAt,
+} = {}) {
+  await ensureLoaded();
+  const target = state.accounts.find((item) => item.id === accountId);
+  if (!target) throw new Error("Account not found.");
+  const setIfValid = (field, value, allowed) => {
+    const normalized = normalizeEnum(value, allowed);
+    if (normalized) target[field] = normalized;
+    else if (value !== undefined) target[field] = "UNKNOWN";
+  };
+  setIfValid("identityStatus", identityStatus, IDENTITY_STATUS_VALUES);
+  setIfValid("privacyStatus", privacyStatus, PRIVACY_STATUS_VALUES);
+  setIfValid("profileEditCapability", profileEditCapability, CAPABILITY_VALUES);
+  setIfValid("linkCapability", linkCapability, CAPABILITY_VALUES);
+  setIfValid("publishingCapability", publishingCapability, CAPABILITY_VALUES);
+  if (observedProfileLink !== undefined) {
+    const normalized = normalizeUrlField(observedProfileLink);
+    if (normalized) target.observedProfileLink = normalized;
+    else delete target.observedProfileLink;
+  }
+  const normalizedEvidence = normalizeCapabilityEvidence(evidence);
+  if (normalizedEvidence) target.capabilityEvidence = normalizedEvidence;
+  target.capabilityCheckedAt = normalizeIsoTimestamp(checkedAt) || new Date().toISOString();
+  await saveState();
+  return clone(target);
+}
+
+// Logical organization only - never touches queue/profile directories or
+// deletes anything (see this module's own header comment on removeAccount's
+// equally conservative stance). Absent `pool` on any pre-existing account
+// means ACTIVE; callers must apply that default themselves (see
+// account-capability.js#effectivePool) rather than this module silently
+// writing a value nobody asked for.
+async function setPool(accountId, { pool, reason } = {}) {
+  await ensureLoaded();
+  const target = state.accounts.find((item) => item.id === accountId);
+  if (!target) throw new Error("Account not found.");
+  if (!POOL_VALUES.has(pool)) throw new Error(`Invalid pool: ${pool}`);
+  target.pool = pool;
+  target.poolUpdatedAt = new Date().toISOString();
+  const safeReason = normalizeSafeText(reason);
+  if (safeReason) target.poolReason = safeReason;
+  else delete target.poolReason;
+  await saveState();
+  return clone(target);
+}
+
+// Marks the intent BEFORE any external mutation is attempted - the
+// "INTENT" step of INTENT -> PREFLIGHT -> MUTATE ONCE -> VERIFY -> PERSIST.
+// Deliberately does not touch observedProfileLink/status beyond APPLYING;
+// setProfileLinkResult (below) is the sole writer of the actual outcome.
+async function setProfileLinkIntent(accountId, desiredUrl) {
+  await ensureLoaded();
+  const target = state.accounts.find((item) => item.id === accountId);
+  if (!target) throw new Error("Account not found.");
+  const normalized = normalizeUrlField(desiredUrl);
+  if (!normalized) throw new Error("desiredUrl is required.");
+  target.desiredProfileLink = normalized;
+  target.profileLinkStatus = "APPLYING";
+  await saveState();
+  return clone(target);
+}
+
+async function setProfileLinkResult(accountId, { status, observedUrl, appliedAt, verifiedAt, failureReason } = {}) {
+  await ensureLoaded();
+  const target = state.accounts.find((item) => item.id === accountId);
+  if (!target) throw new Error("Account not found.");
+  if (!PROFILE_LINK_STATUS_VALUES.has(status)) throw new Error(`Invalid profile link status: ${status}`);
+  target.profileLinkStatus = status;
+  if (observedUrl !== undefined) {
+    const normalized = normalizeUrlField(observedUrl);
+    if (normalized) target.observedProfileLink = normalized;
+    else delete target.observedProfileLink;
+  }
+  if (appliedAt) target.lastLinkAppliedAt = normalizeIsoTimestamp(appliedAt) || target.lastLinkAppliedAt;
+  if (verifiedAt) target.lastLinkVerifiedAt = normalizeIsoTimestamp(verifiedAt) || target.lastLinkVerifiedAt;
+  const safeReason = normalizeSafeText(failureReason);
+  if (safeReason) target.linkFailureReason = safeReason;
+  else if (status === "ACTIVE") delete target.linkFailureReason;
+  await saveState();
+  return clone(target);
+}
+
+// The one place "no pool value stored yet" becomes the caller-facing
+// default - every consumer (dashboard, qualification, orchestrator
+// contracts) must go through this instead of re-deciding the default itself.
+function effectivePool(account) {
+  return POOL_VALUES.has(account?.pool) ? account.pool : "ACTIVE";
+}
+
 async function getPlatformProfileDir(platform, accountId) {
   const acctId = accountId || (await getActiveAccount()).id;
   if (acctId === DEFAULT_ACCOUNT.id && LEGACY_PROFILE_DIRS[platform]) {
@@ -665,5 +836,15 @@ module.exports = {
   clearPersonaProfileId,
   setSessionStatus,
   setPublishStatus,
+  setCapabilities,
+  setPool,
+  setProfileLinkIntent,
+  setProfileLinkResult,
+  effectivePool,
+  IDENTITY_STATUS_VALUES,
+  PRIVACY_STATUS_VALUES,
+  CAPABILITY_VALUES,
+  POOL_VALUES,
+  PROFILE_LINK_STATUS_VALUES,
   PLATFORMS,
 };
