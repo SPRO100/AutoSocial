@@ -249,6 +249,10 @@ function terminalNextAction(state) {
       return "operator must re-authenticate this account";
     case "BLOCKED_CHALLENGE":
       return "operator/account-level review required - the session is oscillating between consent and a security challenge, do not retry automatically";
+    case "ACCOUNT_SUSPENDED":
+      return "this Instagram account has been suspended by Instagram - operator must review/appeal directly through Instagram, never automated";
+    case "UNKNOWN":
+      return "session could not be positively verified - operator should manually inspect this account before assuming it is ready";
     default:
       return "operator review required";
   }
@@ -270,6 +274,17 @@ function mapToPipelineStatus(classification) {
   if (classification.state) {
     if (classification.state === "LOGIN_REQUIRED") return "NEEDS_LOGIN";
     if (classification.state === "FAILED") return "FAILED";
+    // The bulk-import pipeline's status vocabulary is a fixed legacy
+    // 4-value set (READY/NEEDS_LOGIN/CHALLENGE_REQUIRED/FAILED, mirrored by
+    // content-os's ImportRecordResult.status) - UNKNOWN has no dedicated
+    // bucket there. NEEDS_LOGIN is the closest legacy fit: same operator
+    // action either way (re-check/re-authenticate this account), and it is
+    // NOT the CHALLENGE_REQUIRED bucket, which specifically implies a known
+    // recognizable gate exists to resolve - UNKNOWN has none.
+    if (classification.state === "UNKNOWN") return "NEEDS_LOGIN";
+    // ACCOUNT_SUSPENDED and every other granular state fall through here
+    // deliberately - CHALLENGE_REQUIRED is the correct legacy bucket for
+    // "not ready, not simply needs-login, requires operator review".
     return "CHALLENGE_REQUIRED";
   }
   return classification.challenge ? "CHALLENGE_REQUIRED" : "NEEDS_LOGIN";
@@ -280,6 +295,15 @@ function mapToSessionStatus(classification) {
   if (classification.state) {
     if (classification.state === "LOGIN_REQUIRED") return "needs_login";
     if (classification.state === "FAILED") return "error";
+    // Unlike the pipeline mapping above, the account-manager/Dashboard
+    // coarse status already HAS a semantically correct bucket for this:
+    // "unknown" (session-check.js's own contract already documents
+    // "unknown" as the honest state when nothing conclusive is known - this
+    // just also covers "checked, but could not conclude" alongside "never
+    // checked"). Already fail-closed everywhere it's consumed (see
+    // content-os's publish-readiness.service.ts, which blocks both
+    // "unknown" and "error").
+    if (classification.state === "UNKNOWN") return "unknown";
     return "challenge_required";
   }
   return classification.challenge ? "challenge_required" : "needs_login";

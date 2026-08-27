@@ -43,6 +43,26 @@
 // never guessed as active - a false "needs login" just costs a human a
 // re-check; a false "active" is a real external-publish mistake, as the
 // 2026-08-26 incident showed.
+//
+// Second real incident (2026-08-27, bruna118564): Instagram navigated to a
+// real, fully-rendered /accounts/suspended/ page - genuine account-level
+// enforcement, not a login/signup/checkpoint gate. No GATE below recognized
+// it, so the OLD "no known problem => active:true" fallthrough reported
+// READY. This is the same class of mistake as the 2026-08-26 incident
+// (default-open on the unknown case), just on the OTHER end of the
+// function - the fix there was adding a gate; the fix here (see
+// hasPositiveAuthenticatedEvidence below) is architectural: reaching the
+// bottom of this function with NO matched gate no longer means READY by
+// default. It only means READY when at least one independent, already-
+// established positive signal (the authenticated <nav> shell, or the
+// caller's own username found among the page's internal links) is present.
+// Neither signal is trusted alone (a markup change removing <nav> must
+// never alone produce a false needs_login) - they are OR'd together
+// specifically so no single selector is a point of failure in either
+// direction. Absence of BOTH means UNKNOWN (see STATES), never READY and
+// never a guessed failure state either - a distinct, honest "could not
+// prove this" outcome, fail-closed for publishing exactly like every other
+// non-READY state.
 
 // Closed set of granular states this module (gate-driven) and the recovery
 // pipeline built on it (../session-recovery.js, which additionally assigns
@@ -62,6 +82,24 @@ const STATES = {
   TWO_FACTOR_REQUIRED: "TWO_FACTOR_REQUIRED",
   CAPTCHA_REQUIRED: "CAPTCHA_REQUIRED",
   LOGIN_REQUIRED: "LOGIN_REQUIRED",
+  // Real production finding (2026-08-27, bruna118564): a genuine Instagram
+  // account-enforcement page (/accounts/suspended/), distinct from every
+  // gate above - never a login/consent/security-challenge screen, never
+  // resolvable by any automated action, never READY. Terminal, not in
+  // instagram-recovery.js's SAFE_RECOVERABLE_STATES, and deliberately not
+  // folded into SECURITY_CHALLENGE (which implies a resolvable-by-the-user
+  // checkpoint) - an operator needs to know "this account was suspended by
+  // Instagram", not "this needs a checkpoint answered".
+  ACCOUNT_SUSPENDED: "ACCOUNT_SUSPENDED",
+  // The fail-closed outcome for "reached instagram.com, matched no known
+  // gate, and found no positive authenticated evidence either" - see
+  // hasPositiveAuthenticatedEvidence below - and for a navigation/runtime
+  // exception where we never even reached a page to classify. Neither case
+  // is evidence of a login requirement specifically (that would be
+  // overclaiming what we actually observed), so both report UNKNOWN, not
+  // LOGIN_REQUIRED. Never in SAFE_RECOVERABLE_STATES, never auto-retried -
+  // requires a human to actually look at the account.
+  UNKNOWN: "UNKNOWN",
   // Assigned only by session-recovery.js's loop (never by matchGate below) -
   // real production finding (2026-08-26): Instagram's own server can
   // oscillate a session between a consent/cookie screen and its
@@ -163,6 +201,21 @@ const GATES = [
     url: /\/accounts\/(?:emailsignup|signup)\b/i,
     text: /get started on instagram|sign up to see photos and videos/i,
   },
+  // Real observed flow (2026-08-27, bruna118564): a genuine, fully-rendered
+  // https://www.instagram.com/accounts/suspended/?next=... page - not a
+  // navigation error, not a login/consent gate. URL-matched only (this
+  // module has never captured this page's body text from a real run - no
+  // text pattern is added here without that evidence; see this module's own
+  // header comment on not inventing unconfirmed signatures). Never
+  // recoverable - see instagram-recovery.js's SAFE_RECOVERABLE_STATES.
+  {
+    name: "account_suspended",
+    state: STATES.ACCOUNT_SUSPENDED,
+    code: "instagram_account_suspended",
+    reason: "Instagram has suspended this account (enforcement action) - this is not a session/login problem",
+    url: /\/accounts\/suspended\//i,
+    text: null,
+  },
 ];
 
 function matchGate(url, text) {
@@ -200,7 +253,12 @@ async function verifyInstagramSession(page, expectedUsername = null, options = {
 
     const url = page.url();
     if (!/instagram\.com/i.test(url)) {
-      return { active: false, state: STATES.LOGIN_REQUIRED, reason: `did not remain on instagram.com (${safeHostname(url)})` };
+      // Leaving instagram.com entirely is not evidence of specifically a
+      // login requirement - it could be a proxy/DNS oddity, a third-party
+      // interstitial, anything. UNKNOWN is the honest, fail-closed report;
+      // never overclaim LOGIN_REQUIRED for something this module never
+      // actually saw a login page for.
+      return { active: false, state: STATES.UNKNOWN, reason: `did not remain on instagram.com (${safeHostname(url)})`, url };
     }
 
     let text = "";
@@ -223,12 +281,11 @@ async function verifyInstagramSession(page, expectedUsername = null, options = {
       };
     }
 
-    // Best-effort STRENGTHENING signal, never a hard requirement: Instagram's
-    // logged-in home renders a real <nav> landmark; its logged-out landing
-    // page does not. A markup change on Instagram's side must never turn
-    // into a false "needs login" for an account that is genuinely fine, so
-    // this only ever improves the reason string, never flips the verdict to
-    // inactive on its own.
+    // POSITIVE evidence signal #1: Instagram's logged-in home renders a real
+    // <nav> landmark; its logged-out landing page does not. Never trusted
+    // ALONE (a markup change removing it must never alone flip a genuinely
+    // fine account to non-ready) - see hasPositiveAuthenticatedEvidence
+    // below, which OR's this with signal #2.
     let hasAuthenticatedShell = false;
     try {
       hasAuthenticatedShell = (await page.locator("nav").count()) > 0;
@@ -236,9 +293,17 @@ async function verifyInstagramSession(page, expectedUsername = null, options = {
       // Diagnostic only.
     }
 
-    // Identity binding, when the caller supplies the imported username -
-    // never a different account mistaken for this one. Diagnostic-only on
-    // any DOM-inspection failure (never blocks an otherwise-clean result).
+    // Identity binding + POSITIVE evidence signal #2, when the caller
+    // supplies the imported username (both real call sites always do - see
+    // instagram-uploader.js and session-check.js/pipeline.js). A MISMATCH
+    // still fails closed immediately as before (never a different account
+    // mistaken for this one). A CONFIRMED match (the expected handle found
+    // among the page's own internal links) is now also independent positive
+    // evidence this session is authenticated as that specific user - not
+    // just a negative override. Diagnostic-only on any DOM-inspection
+    // failure or when no profile links are observable at all (never blocks
+    // an otherwise-clean result, never fabricates a match).
+    let identityConfirmed = false;
     if (expectedUsername && typeof page.locator === "function") {
       try {
         const handles = await page
@@ -252,27 +317,55 @@ async function verifyInstagramSession(page, expectedUsername = null, options = {
         if (handles.length && !handles.includes(expected)) {
           return { active: false, state: STATES.LOGIN_REQUIRED, reason: "authenticated identity did not match the imported username", url };
         }
+        if (handles.length && handles.includes(expected)) identityConfirmed = true;
       } catch {
         // Diagnostic only - navigation/gate result remains the source of truth.
       }
+    }
+
+    // PRIMARY GOAL of this hardening (2026-08-27, real bruna118564 incident):
+    // reaching here means no known gate matched - that is NOT, by itself,
+    // evidence of an authenticated session (an unrecognized enforcement/
+    // interstitial page also matches no gate). READY now requires AT LEAST
+    // ONE positive, independent signal. Neither signal is a single brittle
+    // selector on its own - they are OR'd specifically so one drifting
+    // (e.g. a future Instagram markup change removing <nav>) does not by
+    // itself produce a false negative, while requiring at least one keeps
+    // "we saw nothing wrong" from ever being treated as "we confirmed it's
+    // fine" (see this module's own header comment: a false READY is a real
+    // external-publish mistake; a false non-READY only costs a re-check).
+    const hasPositiveAuthenticatedEvidence = hasAuthenticatedShell || identityConfirmed;
+    if (!hasPositiveAuthenticatedEvidence) {
+      return {
+        active: false,
+        state: STATES.UNKNOWN,
+        url,
+        reason: "reached Instagram with no recognized gate and no positive authenticated-session evidence - failing closed",
+      };
     }
 
     return {
       active: true,
       state: STATES.READY,
       url,
-      reason: hasAuthenticatedShell
-        ? "reached Instagram's authenticated app shell with no login/signup/checkpoint gate"
-        : "reached Instagram with no recognized login/signup/checkpoint gate",
+      reason: identityConfirmed
+        ? "reached Instagram's authenticated app shell with a confirmed identity match and no login/signup/checkpoint gate"
+        : "reached Instagram's authenticated app shell with no login/signup/checkpoint gate",
     };
   } catch (error) {
-    // Legacy-compatible bucket: an unexpected navigation/runtime error here
-    // has always been treated the same as "needs a fresh login" by every
-    // existing caller (never a distinct FAILED session status) - preserved
-    // exactly. FAILED is reserved for the recovery pipeline's OWN
-    // infrastructure failures (e.g. a recovery action itself erroring),
-    // never assigned by this module.
-    return { active: false, state: STATES.LOGIN_REQUIRED, reason: `verification failed: ${error.message}` };
+    // An unexpected navigation/runtime error here (e.g. ERR_TOO_MANY_
+    // REDIRECTS) means we never even reached a page to classify - that is
+    // NOT evidence of specifically a login requirement (real incident,
+    // 2026-08-27, brenda9875428: this used to be folded into LOGIN_REQUIRED
+    // unconditionally, overclaiming a login page was seen when it wasn't).
+    // UNKNOWN is the honest, fail-closed report; every existing caller
+    // already treats any non-READY, non-CHALLENGE_REQUIRED state as
+    // "not publish-ready, operator should look" (see session-check.js's
+    // safeVerifyReason - the "verification failed:" prefix is preserved so
+    // that rewrite still applies). FAILED is reserved for the recovery
+    // pipeline's OWN infrastructure failures (e.g. a recovery action itself
+    // erroring), never assigned by this module.
+    return { active: false, state: STATES.UNKNOWN, reason: `verification failed: ${error.message}` };
   }
 }
 

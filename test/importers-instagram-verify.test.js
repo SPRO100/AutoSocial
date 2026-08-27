@@ -98,17 +98,32 @@ test("reports NOT active for a consent/onetap gate, classified as PRIVACY_CHOICE
   assert.match(result.reason, /privacy|subscription|consent/i);
 });
 
-test("reports NOT active when navigated off instagram.com entirely", async () => {
+test("reports NOT active (UNKNOWN, not LOGIN_REQUIRED) when navigated off instagram.com entirely - never proven to be a login page", async () => {
   const page = makePage({ finalUrl: "https://example.com/unexpected" });
   const result = await verifyInstagramSession(page);
   assert.equal(result.active, false);
+  assert.equal(result.state, "UNKNOWN");
 });
 
-test("reports NOT active (fails closed) when navigation itself throws", async () => {
-  const page = makePage({ finalUrl: "https://www.instagram.com/", gotoError: new Error("net::ERR_CONNECTION_RESET") });
+test("reports NOT active (fails closed, UNKNOWN not LOGIN_REQUIRED) when navigation itself throws - real incident 2026-08-27 brenda9875428 ERR_TOO_MANY_REDIRECTS", async () => {
+  const page = makePage({ finalUrl: "https://www.instagram.com/", gotoError: new Error("net::ERR_TOO_MANY_REDIRECTS") });
   const result = await verifyInstagramSession(page);
   assert.equal(result.active, false);
+  assert.equal(result.state, "UNKNOWN", "a navigation exception is not evidence of specifically a login requirement");
   assert.match(result.reason, /verification failed/);
+});
+
+// --- Real production incident: account suspended, no gate previously recognized it ---
+
+test("reports NOT active with state ACCOUNT_SUSPENDED for a real /accounts/suspended/ page (2026-08-27 bruna118564 incident) - NEVER READY", async () => {
+  const page = makePage({
+    finalUrl: "https://www.instagram.com/accounts/suspended/?next=https%3A%2F%2Fwww.instagram.com%2F%3F__coig_ufac%3D1",
+    bodyText: "",
+  });
+  const result = await verifyInstagramSession(page);
+  assert.equal(result.active, false);
+  assert.equal(result.state, "ACCOUNT_SUSPENDED");
+  assert.match(result.reason, /suspend/i);
 });
 
 // --- Genuinely authenticated ---
@@ -117,12 +132,31 @@ test("reports active when the home page shows the authenticated app shell (<nav>
   const page = makePage({ finalUrl: "https://www.instagram.com/", bodyText: "Home Search Explore Reels Messages", hasNav: true });
   const result = await verifyInstagramSession(page);
   assert.equal(result.active, true);
+  assert.equal(result.state, "READY");
 });
 
-test("reports active when no gate matched even without a detectable <nav> marker (never a false negative from an unverified selector)", async () => {
+test("reports active via identity-match evidence ALONE, with no <nav> marker (the two positive signals are independent, either is sufficient)", async () => {
+  const page = makePage({ finalUrl: "https://www.instagram.com/", hasNav: false, profileHandles: ["kinsleyvaughn6", "explore", "direct"] });
+  const result = await verifyInstagramSession(page, "kinsleyvaughn6");
+  assert.equal(result.active, true);
+  assert.equal(result.state, "READY");
+});
+
+// --- Core hardening (2026-08-27, real bruna118564 incident): UNKNOWN is not READY ---
+
+test("reports NOT active (UNKNOWN) when no gate matched AND no positive authenticated evidence exists - READY must be proven, never assumed from absence of a known problem", async () => {
   const page = makePage({ finalUrl: "https://www.instagram.com/", bodyText: "some unexpected but harmless page content", hasNav: false });
   const result = await verifyInstagramSession(page);
-  assert.equal(result.active, true, "the nav marker is a bonus signal only - its absence must never turn a healthy account into a false needs_login");
+  assert.equal(result.active, false, "no gate matching is NOT itself proof of an authenticated session");
+  assert.equal(result.state, "UNKNOWN");
+  assert.match(result.reason, /no positive authenticated-session evidence/i);
+});
+
+test("reports NOT active (UNKNOWN) when no gate matched, no <nav>, and an expected username was supplied but never found among the page's links (no positive evidence, not a mismatch either)", async () => {
+  const page = makePage({ finalUrl: "https://www.instagram.com/", bodyText: "unexpected page", hasNav: false, profileHandles: [] });
+  const result = await verifyInstagramSession(page, "kinsleyvaughn6");
+  assert.equal(result.active, false);
+  assert.equal(result.state, "UNKNOWN");
 });
 
 // --- Identity binding ---

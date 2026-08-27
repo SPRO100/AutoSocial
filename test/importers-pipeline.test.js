@@ -413,7 +413,17 @@ test("updateExistingAccountSession also classifies a scraping_warning challenge 
       attachPersonaProfile: async (profileId) => {
         attachCount += 1;
         const url = attachCount === 1 ? INSTAGRAM_ACTIVE_URL : SCRAPING_WARNING_URL;
-        return { profileId, page: makeFakePage(url), browser: {}, context: {}, info: { port: 1 } };
+        // makeFakePage has no `locator` at all - fine for the challenge leg
+        // (matched by URL alone, before any positive-evidence check runs),
+        // but the first/READY leg needs real positive evidence (2026-08-27
+        // hardening: "no gate matched" is no longer sufficient for READY on
+        // its own) - a bare <nav> landmark stub is enough to prove it,
+        // mirroring makeRecoverableInstagramPage's same pattern above.
+        const page = makeFakePage(url);
+        if (attachCount === 1) {
+          page.locator = (selector) => (selector === "nav" ? { count: async () => 1 } : { count: async () => 0, innerText: async () => "", evaluateAll: async () => [] });
+        }
+        return { profileId, page, browser: {}, context: {}, info: { port: 1 } };
       },
     },
   });

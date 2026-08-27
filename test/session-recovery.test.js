@@ -239,6 +239,39 @@ test("mapToSessionStatus mirrors the same legacy-fallback and granular rules at 
   assert.equal(mapToSessionStatus({ active: false, state: "BLOCKED_CHALLENGE" }), "challenge_required");
 });
 
+// 2026-08-27 hardening (real bruna118564/brenda9875428 incidents) - the two
+// new terminal/inconclusive states must map to a coarse status that is
+// ALREADY fail-closed everywhere it's consumed (see
+// publish-readiness.service.ts on the content-os side, which blocks both
+// "challenge_required" and "unknown"/"error" - neither of these new states
+// is ever allowed to reach "ready").
+test("ACCOUNT_SUSPENDED maps to CHALLENGE_REQUIRED/challenge_required - never READY, never silently merged into needs_login", () => {
+  assert.equal(mapToPipelineStatus({ active: false, state: "ACCOUNT_SUSPENDED" }), "CHALLENGE_REQUIRED");
+  assert.equal(mapToSessionStatus({ active: false, state: "ACCOUNT_SUSPENDED" }), "challenge_required");
+});
+
+test("UNKNOWN maps to NEEDS_LOGIN (pipeline legacy 4-value contract) and unknown (session-check 5-value contract) - never READY, never CHALLENGE_REQUIRED (no known gate exists to resolve)", () => {
+  assert.equal(mapToPipelineStatus({ active: false, state: "UNKNOWN" }), "NEEDS_LOGIN");
+  assert.equal(mapToSessionStatus({ active: false, state: "UNKNOWN" }), "unknown");
+});
+
+test("neither ACCOUNT_SUSPENDED nor UNKNOWN is ever attempted by the real Instagram recovery module - both stay terminal", () => {
+  const { SAFE_RECOVERABLE_STATES } = require("../src/importers/instagram-recovery");
+  assert.equal(SAFE_RECOVERABLE_STATES.has("ACCOUNT_SUSPENDED"), false);
+  assert.equal(SAFE_RECOVERABLE_STATES.has("UNKNOWN"), false);
+});
+
+for (const state of ["ACCOUNT_SUSPENDED", "UNKNOWN"]) {
+  test(`${state} -> stop immediately, no automated recovery action ever attempted (terminal/unknown states never invoke attemptRecovery)`, async () => {
+    const { verify, calls } = scriptedVerify([{ active: false, state, reason: "test", url: "https://ig/x/" }]);
+    const recover = fakeRecover(["COOKIE_CONSENT_REQUIRED"]);
+    const result = await recoverSession({ verify, recover, page: {}, username: "u" });
+    assert.equal(result.state, state);
+    assert.equal(calls.length, 1);
+    assert.equal(recover.attempts.length, 0);
+  });
+}
+
 test("BLOCKED_CHALLENGE is never in SAFE_RECOVERABLE_STATES for the real Instagram recovery module - it must stay terminal, never attempted", () => {
   // Real module, not a fake - this is the actual production safety
   // boundary, not just an orchestrator-level guarantee.

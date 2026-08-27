@@ -65,6 +65,12 @@ const SESSION_STATE_VALUES = new Set([
   "RECOVERY_RETRYABLE",
   "RECOVERY_EXHAUSTED",
   "FAILED",
+  // 2026-08-27 hardening (see importers/instagram-verify.js STATES) - must
+  // be kept in sync with that enum or normalizeEnum below silently drops
+  // the value to null on persistence, even though it was classified
+  // correctly upstream.
+  "ACCOUNT_SUSPENDED",
+  "UNKNOWN",
 ]);
 // Bounded so a account's history can never grow unbounded across repeated
 // checks/recoveries - only the most recent run's attempts are operationally

@@ -245,6 +245,31 @@ test("importPlatform/importUsername survive a save/reload round trip, and a plai
   assert.equal(rawImported.importPlatform, "tiktok");
 });
 
+// 2026-08-27 hardening (real bruna118564/brenda9875428 incidents) - the
+// granular sessionState allowlist (SESSION_STATE_VALUES) must be kept in
+// sync with instagram-verify.js's STATES or normalizeEnum silently drops an
+// unrecognized value to null on persistence, even though it was classified
+// correctly upstream. Both new states must survive setSessionStatus and a
+// disk reload exactly like every pre-existing state does.
+for (const state of ["ACCOUNT_SUSPENDED", "UNKNOWN"]) {
+  test(`setSessionStatus persists the new "${state}" sessionState across a reload from disk (never silently dropped to null)`, async () => {
+    const { accountManager } = await freshAccountManager();
+    const account = await accountManager.addAccount("ig-account");
+    await accountManager.setSessionStatus(account.id, {
+      status: "challenge_required",
+      reason: `test reason for ${state}`,
+      checkedAt: new Date().toISOString(),
+      state,
+      attempts: null,
+    });
+
+    delete require.cache[require.resolve("../src/account-manager")];
+    const reloaded = require("../src/account-manager");
+    const persisted = await reloaded.getAccountById(account.id);
+    assert.equal(persisted.sessionState, state, `sessionState must round-trip as "${state}", never null`);
+  });
+}
+
 test("many concurrent addAccount calls (as the bulk importer's worker pool issues) never lose an update on disk - final file matches final in-memory state", async () => {
   const { accountManager, stateFile } = await freshAccountManager();
 
