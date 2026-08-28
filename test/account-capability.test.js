@@ -12,6 +12,7 @@ const {
   classifyIdentity,
   safePathOnly,
   safeMessage,
+  deriveLinkMechanisms,
 } = require("../src/account-capability");
 
 // Minimal fake Playwright Locator - chainable no-ops plus scripted leaf
@@ -263,4 +264,34 @@ test("safeMessage redacts known session/csrf query params and bounds length", ()
   const msg = safeMessage("failed at ?sessionid=abc123&other=1".repeat(10));
   assert.ok(!msg.includes("abc123"));
   assert.ok(msg.length <= 160);
+});
+
+// --- ADR 0033 section 7: Platform Link Capabilities (capability-based mechanism model) ---
+
+test("deriveLinkMechanisms: only PROFILE_WEBSITE carries real evidence, every other mechanism fails closed to UNKNOWN", () => {
+  const result = deriveLinkMechanisms("AVAILABLE");
+  assert.equal(result.PROFILE_WEBSITE, "AVAILABLE");
+  assert.equal(result.DESTINATION_LINK, "UNKNOWN");
+  assert.equal(result.VIDEO_LINK, "UNKNOWN");
+  assert.equal(result.COMMENT_ANCHOR, "UNKNOWN");
+  assert.equal(result.BUSINESS_PAGE, "UNKNOWN");
+});
+
+test("deriveLinkMechanisms: never reports a mechanism as AVAILABLE just because PROFILE_WEBSITE is UNAVAILABLE/UNKNOWN", () => {
+  assert.deepEqual(Object.values(deriveLinkMechanisms("UNAVAILABLE")).filter((v) => v === "AVAILABLE"), []);
+  assert.deepEqual(Object.values(deriveLinkMechanisms("UNKNOWN")).filter((v) => v === "AVAILABLE"), []);
+});
+
+test("probeInstagramCapabilities includes linkMechanisms.PROFILE_WEBSITE matching the aggregate linkCapability", async () => {
+  const page = fakePage({ locators: [[/placeholder="Website"/i, { count: 1, inputValue: "https://example.com/a" }]] });
+  const result = await probeInstagramCapabilities(page, "someuser");
+  assert.equal(result.linkMechanisms.PROFILE_WEBSITE, result.linkCapability);
+  assert.equal(result.linkMechanisms.DESTINATION_LINK, "UNKNOWN");
+});
+
+test("probeTikTokCapabilities includes linkMechanisms.PROFILE_WEBSITE matching the aggregate linkCapability", async () => {
+  const page = fakePage({ gotoStatus: 403 });
+  const result = await probeTikTokCapabilities(page, "fakeuser");
+  assert.equal(result.linkMechanisms.PROFILE_WEBSITE, result.linkCapability);
+  assert.equal(result.linkMechanisms.BUSINESS_PAGE, "UNKNOWN");
 });

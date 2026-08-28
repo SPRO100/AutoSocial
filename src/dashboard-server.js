@@ -52,6 +52,7 @@ const {
   probeInstagramCapabilities,
   probeTikTokCapabilities,
   applyInstagramProfileLink,
+  deriveLinkMechanisms,
 } = require("./account-capability");
 const {
   stopPersonaProfile,
@@ -726,6 +727,7 @@ async function createServer() {
       privacyStatus: account.privacyStatus || "UNKNOWN",
       profileEditCapability: account.profileEditCapability || "UNKNOWN",
       linkCapability: account.linkCapability || "UNKNOWN",
+      linkMechanisms: account.linkMechanisms || deriveLinkMechanisms("UNKNOWN"),
       publishingCapability: account.publishingCapability || "UNKNOWN",
       observedProfileLink: account.observedProfileLink || null,
       desiredProfileLink: account.desiredProfileLink || null,
@@ -753,6 +755,7 @@ async function createServer() {
         privacyStatus: account.privacyStatus || "UNKNOWN",
         profileEditCapability: account.profileEditCapability || "UNKNOWN",
         linkCapability: account.linkCapability || "UNKNOWN",
+        linkMechanisms: account.linkMechanisms || deriveLinkMechanisms("UNKNOWN"),
         publishingCapability: account.publishingCapability || "UNKNOWN",
         observedProfileLink: account.observedProfileLink || null,
         desiredProfileLink: account.desiredProfileLink || null,

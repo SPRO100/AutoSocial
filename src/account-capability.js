@@ -101,6 +101,26 @@ async function readInstagramPrivacy(page) {
   }
 }
 
+// ADR 0033 section 7 (Platform Link Capabilities) - fail-closed by construction:
+// every mechanism defaults to UNKNOWN unless this module has REAL evidence
+// for it. Only PROFILE_WEBSITE (the "Website" field in Edit Profile) is
+// currently probed on either platform; DESTINATION_LINK (e.g. TikTok's
+// Business Suite destination links), VIDEO_LINK, COMMENT_ANCHOR, and
+// BUSINESS_PAGE have no detection implemented - reporting them as
+// anything but UNKNOWN would be exactly the "unproven availability"
+// mistake ADR 0033 explicitly forbids. This is additive to the existing
+// linkCapability field (which stays PROFILE_WEBSITE's own signal, for
+// backward compatibility with every existing caller), never a replacement.
+function deriveLinkMechanisms(profileWebsiteCapability) {
+  return {
+    PROFILE_WEBSITE: profileWebsiteCapability,
+    DESTINATION_LINK: "UNKNOWN",
+    VIDEO_LINK: "UNKNOWN",
+    COMMENT_ANCHOR: "UNKNOWN",
+    BUSINESS_PAGE: "UNKNOWN",
+  };
+}
+
 function classifyIdentity(identity) {
   if (!identity) return "UNKNOWN";
   if (identity.reason && /identity did not match/i.test(identity.reason)) return "MISMATCH";
@@ -121,6 +141,7 @@ async function probeInstagramCapabilities(page, expectedUsername) {
       privacyStatus: "UNKNOWN",
       profileEditCapability: "UNKNOWN",
       linkCapability: "UNKNOWN",
+      linkMechanisms: deriveLinkMechanisms("UNKNOWN"),
       publishingCapability: "UNKNOWN",
       observedProfileLink: null,
       restrictions: { sessionState: identity?.state || null, reason: identity?.reason || null },
@@ -134,6 +155,7 @@ async function probeInstagramCapabilities(page, expectedUsername) {
     privacyStatus: privacy.privacyStatus,
     profileEditCapability: edit.profileEditCapability,
     linkCapability: edit.linkCapability,
+    linkMechanisms: deriveLinkMechanisms(edit.linkCapability),
     // Publishing capability for Instagram is proven directly by the real
     // production E2E publish milestone, not re-probed here - a READY,
     // identity-confirmed session with no restriction evidence is AVAILABLE.
@@ -307,6 +329,7 @@ async function probeTikTokCapabilities(page, username) {
     privacyStatus: privacy.privacyStatus,
     profileEditCapability: link.profileEditCapability,
     linkCapability: link.linkCapability,
+    linkMechanisms: deriveLinkMechanisms(link.linkCapability),
     publishingCapability: "AVAILABLE",
     observedProfileLink: link.observedProfileLink,
     restrictions: { sessionState: "READY", reason: null },
@@ -318,6 +341,7 @@ module.exports = {
   probeInstagramCapabilities,
   probeTikTokCapabilities,
   applyInstagramProfileLink,
+  deriveLinkMechanisms,
   safePathOnly,
   safeMessage,
   // Exported for focused unit testing only - probeInstagramCapabilities/

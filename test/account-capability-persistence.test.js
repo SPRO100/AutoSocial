@@ -123,3 +123,29 @@ test("setCapabilities/setPool/setProfileLinkIntent all reject an unknown account
   await assert.rejects(() => accountManager.setPool("does-not-exist", { pool: "ACTIVE" }));
   await assert.rejects(() => accountManager.setProfileLinkIntent("does-not-exist", "https://example.com/a"));
 });
+
+test("setCapabilities persists linkMechanisms and it survives a reload from disk, always carrying all five mechanism keys", async () => {
+  const { accountManager } = await freshAccountManager();
+  const account = await accountManager.addAccount("Link Mechanisms Account");
+  const updated = await accountManager.setCapabilities(account.id, {
+    linkCapability: "AVAILABLE",
+    linkMechanisms: { PROFILE_WEBSITE: "AVAILABLE" },
+  });
+  assert.deepEqual(updated.linkMechanisms, {
+    PROFILE_WEBSITE: "AVAILABLE", DESTINATION_LINK: "UNKNOWN", VIDEO_LINK: "UNKNOWN", COMMENT_ANCHOR: "UNKNOWN", BUSINESS_PAGE: "UNKNOWN",
+  });
+
+  delete require.cache[require.resolve("../src/account-manager")];
+  const reloaded = require("../src/account-manager");
+  const reloadedAccount = await reloaded.getAccountById(account.id);
+  assert.equal(reloadedAccount.linkMechanisms.PROFILE_WEBSITE, "AVAILABLE");
+});
+
+test("setCapabilities ignores an unrecognized mechanism name rather than inventing a new one", async () => {
+  const { accountManager } = await freshAccountManager();
+  const account = await accountManager.addAccount("Unknown Mechanism Account");
+  const updated = await accountManager.setCapabilities(account.id, {
+    linkMechanisms: { PROFILE_WEBSITE: "AVAILABLE", MADE_UP_MECHANISM: "AVAILABLE" },
+  });
+  assert.equal("MADE_UP_MECHANISM" in updated.linkMechanisms, false);
+});

@@ -52,6 +52,9 @@ const PUBLISH_STATUS_VALUES = new Set(["published", "failed", "unconfirmed"]);
 const IDENTITY_STATUS_VALUES = new Set(["CONFIRMED", "MISMATCH", "UNKNOWN"]);
 const PRIVACY_STATUS_VALUES = new Set(["PUBLIC", "PRIVATE", "UNKNOWN", "NOT_APPLICABLE"]);
 const CAPABILITY_VALUES = new Set(["AVAILABLE", "UNAVAILABLE", "UNKNOWN"]);
+// ADR 0033 section 7 - the closed set of link-placement mechanisms this codebase
+// knows about. Keep in sync with account-capability.js#deriveLinkMechanisms.
+const LINK_MECHANISM_NAMES = new Set(["PROFILE_WEBSITE", "DESTINATION_LINK", "VIDEO_LINK", "COMMENT_ANCHOR", "BUSINESS_PAGE"]);
 const POOL_VALUES = new Set(["ACTIVE", "QUARANTINE", "ARCHIVED"]);
 const PROFILE_LINK_STATUS_VALUES = new Set([
   "UNKNOWN", "UNAVAILABLE", "NOT_SET", "APPLYING", "ACTIVE", "MISSING", "MISMATCH", "BROKEN", "ERROR",
@@ -190,6 +193,21 @@ function normalizeCapabilityEvidence(value) {
   return normalized.length ? normalized : null;
 }
 
+// Fails closed field-by-field: an unrecognized mechanism name is dropped
+// (never invented), and any mechanism with an invalid/missing status
+// normalizes to UNKNOWN rather than being silently omitted - a caller
+// reading this object must always see all five known mechanism keys.
+function normalizeLinkMechanisms(value) {
+  if (!value || typeof value !== "object") return null;
+  const out = {};
+  let any = false;
+  for (const name of LINK_MECHANISM_NAMES) {
+    out[name] = normalizeEnum(value[name], CAPABILITY_VALUES) || "UNKNOWN";
+    if (name in value) any = true;
+  }
+  return any ? out : null;
+}
+
 function normalizeUrlField(value, maxLen = 500) {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
@@ -292,6 +310,8 @@ function normalizeAccount(item) {
   if (profileEditCapability) account.profileEditCapability = profileEditCapability;
   const linkCapability = normalizeEnum(item.linkCapability, CAPABILITY_VALUES);
   if (linkCapability) account.linkCapability = linkCapability;
+  const linkMechanisms = normalizeLinkMechanisms(item.linkMechanisms);
+  if (linkMechanisms) account.linkMechanisms = linkMechanisms;
   const publishingCapability = normalizeEnum(item.publishingCapability, CAPABILITY_VALUES);
   if (publishingCapability) account.publishingCapability = publishingCapability;
   const capabilityCheckedAt = normalizeIsoTimestamp(item.capabilityCheckedAt);
@@ -673,7 +693,7 @@ async function setPublishStatus(accountId, { status, reason, at } = {}) {
 // same contract as every setter above.
 
 async function setCapabilities(accountId, {
-  identityStatus, privacyStatus, profileEditCapability, linkCapability, publishingCapability,
+  identityStatus, privacyStatus, profileEditCapability, linkCapability, linkMechanisms, publishingCapability,
   observedProfileLink, evidence, checkedAt,
 } = {}) {
   await ensureLoaded();
@@ -688,6 +708,8 @@ async function setCapabilities(accountId, {
   setIfValid("privacyStatus", privacyStatus, PRIVACY_STATUS_VALUES);
   setIfValid("profileEditCapability", profileEditCapability, CAPABILITY_VALUES);
   setIfValid("linkCapability", linkCapability, CAPABILITY_VALUES);
+  const normalizedMechanisms = normalizeLinkMechanisms(linkMechanisms);
+  if (normalizedMechanisms) target.linkMechanisms = normalizedMechanisms;
   setIfValid("publishingCapability", publishingCapability, CAPABILITY_VALUES);
   if (observedProfileLink !== undefined) {
     const normalized = normalizeUrlField(observedProfileLink);
